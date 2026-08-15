@@ -16,8 +16,6 @@ A Payment can carry at most **6 paths**, each at most **8 hops**. PathFinder nev
 4. Serves a worker pool (default 128, cap 256) so ~100 concurrent `path_find` sockets stay live.
 5. Proxies every other RPC/WS command to the upstream node.
 
-Do not edit `~/Dev/Ledgers/rippled`. All work stays in this tree.
-
 ## How search works
 
 Not xrpld’s Pathfinder table (level 1–10). Search is a local book graph:
