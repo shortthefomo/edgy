@@ -462,6 +462,11 @@ main()
         expect(view->exists(xrpl::keylet::account(src)), "account exists in memory ledger");
         expect(view->read(xrpl::keylet::account(src)) != nullptr, "account readable");
         expect(view->size() == 1, "single object stored");
+        // Rules::Impl refs presets; a temporary set used to UAF in enabled().
+        (void)view->rules().enabled(xrpl::uint256{});
+        auto const rebuilt = xrpl::makeRulesGivenLedger(*view, view->rules());
+        (void)rebuilt.enabled(xrpl::uint256{});
+        expect(true, "Rules::enabled after publish does not dangle presets");
 
         xrpl::Serializer extra;
         sle->add(extra);
