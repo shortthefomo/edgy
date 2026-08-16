@@ -7,6 +7,14 @@
 
 namespace edgy {
 
+// Which ledger family [node] speaks. Both use the same public WS/RPC
+// (ledger_data, subscribe, server_state). xahau native JSON is XAH.
+enum class NetworkKind
+{
+    xrpl,
+    xahau,
+};
+
 struct Config
 {
     std::string nodeWs{"ws://127.0.0.1:6006"};
@@ -34,6 +42,32 @@ struct Config
 
     bool proxyOther{true};
     bool fullSnapshot{true};
+
+    NetworkKind network{NetworkKind::xrpl};
+
+    [[nodiscard]] bool
+    xahau() const
+    {
+        return network == NetworkKind::xahau;
+    }
+
+    [[nodiscard]] char const*
+    networkName() const
+    {
+        return xahau() ? "xahau" : "xrpl";
+    }
+
+    [[nodiscard]] char const*
+    nativeCurrency() const
+    {
+        return xahau() ? "XAH" : "XRP";
+    }
+
+    [[nodiscard]] char const*
+    nodeSoftware() const
+    {
+        return xahau() ? "xahaud" : "xrpld";
+    }
 
     static Config
     fromFile(std::string const& path);

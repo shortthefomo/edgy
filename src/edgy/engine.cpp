@@ -1,5 +1,6 @@
 #include <edgy/engine.hpp>
 
+#include <edgy/protocol.hpp>
 #include <edgy/thread_pool.hpp>
 
 #include <xrpld/rpc/detail/Pathfinder.h>
@@ -31,26 +32,6 @@
 
 namespace edgy {
 namespace {
-
-xrpl::SLE::pointer
-sleFromBinary(std::string const& dataHex, std::string const& indexHex)
-{
-    auto const blob = xrpl::strUnHex(dataHex);
-    if (!blob)
-        return nullptr;
-    xrpl::uint256 key;
-    if (!key.parseHex(indexHex))
-        return nullptr;
-    try
-    {
-        xrpl::SerialIter sit(xrpl::makeSlice(*blob));
-        return std::make_shared<xrpl::SLE>(sit, key);
-    }
-    catch (...)
-    {
-        return nullptr;
-    }
-}
 
 bool
 offerComplete(xrpl::SLE const& sle)
@@ -222,7 +203,9 @@ applyJsonAffectedNodes(
         {
             if (!item.isMember(kind.name) || !item[kind.name].isObject())
                 continue;
-            xrpl::STParsedJSONObject parsed(kind.name, item[kind.name]);
+            json::Value node = item[kind.name];
+            stripUnknownJsonFields(node);
+            xrpl::STParsedJSONObject parsed(kind.name, node);
             if (!parsed.object)
             {
                 ++stats.parseFail;
@@ -404,6 +387,9 @@ Engine::statusJson() const
         j[xrpl::jss::complete_ledgers] = "empty";
         j["objects"] = static_cast<std::uint32_t>(objects_.load());
     }
+    j["network"] = cfg_.networkName();
+    j["native_currency"] = cfg_.nativeCurrency();
+    j["node"] = cfg_.nodeSoftware();
     j["workers"] = cfg_.workers;
     j["update_ms"] = static_cast<std::uint32_t>(cfg_.midCloseDelay.count());
     j["search"] = cfg_.search;
@@ -487,6 +473,9 @@ Engine::pathCountsJson() const
     }
 
     j["source"] = "edgy";
+    j["network"] = cfg_.networkName();
+    j["native_currency"] = cfg_.nativeCurrency();
+    j["node"] = cfg_.nodeSoftware();
     j["server_state"] = ready_.load() ? "full" : "syncing";
     j["uptime"] = uptime;
     j["load_factor"] = 1;
@@ -811,7 +800,9 @@ Engine::loadSnapshot()
     if (firstSeq_.load() == 0)
         firstSeq_.store(header.seq);
     currentSeq_.store(header.seq);
-    std::cerr << "snapshot ledger " << header.seq << " " << to_string(header.hash) << '\n';
+    std::cerr << "snapshot ledger " << header.seq << " " << to_string(header.hash)
+              << " network=" << cfg_.networkName() << " native=" << cfg_.nativeCurrency()
+              << '\n';
 
     auto loadType = [&](std::optional<std::string> type, bool optionalType = false) {
         json::Value marker;
@@ -897,8 +888,10 @@ Engine::loadSnapshot()
     else
     {
         // Path-relevant types only: books, AMMs, directories, accounts, lines.
-        for (char const* type : {"offer", "amm", "directory", "account", "state"})
+        for (char const* type : {"offer", "directory", "account", "state"})
             loadType(std::string{type});
+        // AMM is XRPL-only; xahaud and some public hubs reject the type filter.
+        loadType(std::string{"amm"}, true);
         // Fees/amendments are required for RippleCalc even on a books snapshot.
         // Some public hubs reject these type filters; those are best-effort.
         loadType(std::string{"fee"}, true);

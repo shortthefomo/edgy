@@ -21,7 +21,9 @@ usage()
     std::cerr
         << "Usage: edgy [options] [edgy.cfg]\n"
         << "  --conf <file>               xrpld-style config (stanzas)\n"
-        << "  --node <ws://host:port>     Upstream xrpld WebSocket\n"
+        << "  --node <ws://host:port>     Upstream xrpld/xahaud WebSocket\n"
+        << "  --network <xrpl|xahau>      Ledger family of [node] (default xrpl)\n"
+        << "  --xahau                     Same as --network xahau\n"
         << "  --listen-ws <host:port>     Local WebSocket\n"
         << "  --listen-rpc <host:port>    Local JSON-RPC HTTP\n"
         << "  --workers <n>               Concurrent path_find workers\n"
@@ -30,12 +32,12 @@ usage()
         << "  --search-fast <full|fast|N> First WebSocket reply depth (default full)\n"
         << "  --timeout-ms <n>            Abort one search after N ms (0 = none)\n"
         << "  --full-snapshot [0|1|full]  Full ledger vs books-only (default full)\n"
-        << "  --no-proxy                  Do not forward unknown RPCs to xrpld\n"
+        << "  --no-proxy                  Do not forward unknown RPCs to the node\n"
         << "  --version                   Print version and exit\n"
         << "  --help\n"
         << "\n"
         << "File stanzas (value on the following line, like xrpld.cfg):\n"
-        << "  [node]  [listen-ws]  [listen-rpc]  [workers]  [net-threads]\n"
+        << "  [node]  [network]  [listen-ws]  [listen-rpc]  [workers]  [net-threads]\n"
         << "  [update-ms]  [proxy]  [debug]\n"
         << "  [search]  [search-fast]  [timeout-ms]  [full-snapshot]\n"
         << "  [max_total_lines]  [max_lines_per_account]\n"
@@ -111,6 +113,17 @@ parseSnapshot(std::string const& v)
     return parseFlag(v);
 }
 
+NetworkKind
+parseNetwork(std::string const& v)
+{
+    auto const s = normalizeName(v);
+    if (s == "xrpl" || s == "xrpld" || s == "xrp" || s == "ripple")
+        return NetworkKind::xrpl;
+    if (s == "xahau" || s == "xahaud" || s == "xah")
+        return NetworkKind::xahau;
+    throw std::runtime_error("invalid [network] (want xrpl or xahau): " + v);
+}
+
 std::chrono::milliseconds
 parseTimeout(std::string const& v)
 {
@@ -150,6 +163,8 @@ applyScalar(Config& cfg, std::string const& section, std::string const& value)
         cfg.searchTimeout = parseTimeout(value);
     else if (section == "full-snapshot")
         cfg.fullSnapshot = parseSnapshot(value);
+    else if (section == "network" || section == "node-type")
+        cfg.network = parseNetwork(value);
     else if (section == "max-total-lines")
         cfg.maxTotalLines = static_cast<std::size_t>(std::stoull(value));
     else if (section == "max-lines-per-account")
@@ -305,6 +320,18 @@ Config::fromArgs(int argc, char** argv)
         {
             cli.emplace_back("node", need("--node"));
         }
+        else if (arg == "--network")
+        {
+            cli.emplace_back("network", need("--network"));
+        }
+        else if (arg == "--xahau" || arg == "--xahaud")
+        {
+            cli.emplace_back("network", "xahau");
+        }
+        else if (arg == "--xrpl" || arg == "--xrpld")
+        {
+            cli.emplace_back("network", "xrpl");
+        }
         else if (arg == "--listen-ws")
         {
             cli.emplace_back("listen-ws", need("--listen-ws"));
@@ -386,6 +413,9 @@ Config::fromArgs(int argc, char** argv)
         cfg.nodeWs = env;
     else if (auto const* env = std::getenv("PATHFINDER_NODE"))
         cfg.nodeWs = env;
+
+    if (auto const* env = std::getenv("EDGY_NETWORK"))
+        cfg.network = parseNetwork(env);
 
     for (auto const& [section, value] : cli)
         applyScalar(cfg, std::string{section}, value);

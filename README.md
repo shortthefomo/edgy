@@ -1,6 +1,6 @@
 # Edgy
 
-A local XRPL `path_find` / `ripple_path_find` sidecar. It full-syncs the validated ledger from an `xrpld` node, keeps that state in memory, and answers path-finding from the local snapshot so searches do not wait on another node.
+A local `path_find` / `ripple_path_find` sidecar for the XRP Ledger and [Xahau](https://github.com/Xahau/xahaud). It full-syncs the validated ledger from an `xrpld` or `xahaud` node, keeps that state in memory, and answers path-finding from the local snapshot so searches do not wait on another node.
 
 Wire JSON matches xrpld: `alternatives`, `source_amount`, `paths_computed`, `paths_canonical`, `full_reply`, ledger identity, and the path warning tokens.
 
@@ -8,7 +8,7 @@ A Payment can carry at most **6 paths**, each at most **8 hops**. Edgy never ret
 
 ## Why this exists
 
-`xrpld` Pathfinder is expensive under many concurrent WebSocket sessions. This process:
+`xrpld` / `xahaud` Pathfinder is expensive under many concurrent WebSocket sessions. This process:
 
 1. Full-syncs every ledger object once (`ledger_data`, binary).
 2. Applies each validated transaction’s binary `AffectedNodes` locally.
@@ -56,6 +56,9 @@ If `edgy.cfg` or `cfg/edgy.cfg` exists in the working directory, it is loaded au
 
 [node]
 ws://127.0.0.1:6006
+
+[network]
+xrpl
 
 [workers]
 64
@@ -105,7 +108,8 @@ Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `sna
 | Flag / stanza | Meaning |
 | --- | --- |
 | `--conf` / file path | Config file |
-| `[node]` / `--node` | Upstream `xrpld` WebSocket |
+| `[node]` / `--node` | Upstream `xrpld` or `xahaud` WebSocket |
+| `[network]` / `--network` | `xrpl` (default) or `xahau`. `--xahau` is the same as `--network xahau` |
 | `[listen-ws]` / `--listen-ws` | Local WebSocket (`path_find` + proxy) |
 | `[listen-rpc]` / `--listen-rpc` | Local HTTP JSON-RPC |
 | `[workers]` / `--workers` | Concurrent search threads (1–256, default 128) |
@@ -122,7 +126,9 @@ Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `sna
 | `[line_chunk_size]` | Line-fetch chunk |
 | `[cache_reuse_ledgers]` | Reuse line cache across this many ledgers |
 
-`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted.
+`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted. `EDGY_NETWORK` overrides `[network]` unless `--network` / `--xahau` is also passed.
+
+Set `[network] xahau` (or `--xahau`) when `[node]` is an [xahaud](https://github.com/Xahau/xahaud) server. Public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts then accept and return `XAH` instead of `XRP`. Unknown xahaud ledger types (Hooks, URITokens) are stored as blobs and skipped for path finding.
 
 Default is a full ledger sync and a full book-graph search. Set `[search-fast]` below `[search]` to start WebSocket replies shallow and deepen while the socket stays open.
 

@@ -149,11 +149,14 @@ Configuration and the RPC/WS API are documented in [`README.md`](README.md). Aft
 
 ```bash
 cp cfg/edgy.example.cfg edgy.cfg
-# edit [node] to your xrpld WebSocket
+# edit [node] to your xrpld or xahaud WebSocket
+# for xahaud: set [network] xahau  or pass --xahau
 .build/edgy --conf edgy.cfg
 ```
 
 Startup requires the upstream `server_state` to be `full`, `proposing`, or `unknown`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
+
+Against [xahaud](https://github.com/Xahau/xahaud), Edgy still links `libxrpl` from rippled. Set `[network] xahau` so native JSON uses `XAH`. Extra xahaud object types are kept as blobs and ignored by the book graph.
 
 ## Release build
 
