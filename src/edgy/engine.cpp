@@ -467,7 +467,9 @@ Engine::enqueueApply(bool ledgerClosed, json::Value msg)
 {
     {
         std::lock_guard lock(applyMutex_);
-        if (applyQueue_.size() > 20'000)
+        // Snapshot can take several minutes. ~20 closes/min × ~100 txs
+        // would overflow 20k and force another full snapshot.
+        if (applyQueue_.size() > 100'000)
         {
             while (!applyQueue_.empty())
                 applyQueue_.pop();
@@ -586,10 +588,9 @@ Engine::syncLoop()
             if (stop_.load())
                 return;
 
-            std::cerr << "loading " << (cfg_.fullSnapshot ? "full" : "books")
-                      << " ledger snapshot from " << cfg_.nodeWs << '\n';
-            JLOG(j.info()) << "loading ledger snapshot from " << cfg_.nodeWs;
-            loadSnapshot();
+            // Subscribe before the snapshot so closes during the 5–10 min
+            // load are queued and applied, not treated as a gap that
+            // triggers another full snapshot.
             if (!subscribed)
             {
                 json::Value sub{json::ValueType::Object};
@@ -600,6 +601,12 @@ Engine::syncLoop()
                 (void)node_->request("subscribe", sub, std::chrono::seconds{15});
                 subscribed = true;
             }
+
+            std::cerr << "loading " << (cfg_.fullSnapshot ? "full" : "books")
+                      << " ledger snapshot from " << cfg_.nodeWs
+                      << " (once; later closes apply incrementally)\n";
+            JLOG(j.info()) << "loading ledger snapshot from " << cfg_.nodeWs;
+            loadSnapshot();
             if (auto view = ledger(); view && firstSeq_.load() == 0)
                 firstSeq_.store(view->seq());
             needResync_.store(false);
@@ -897,8 +904,15 @@ Engine::applyLedgerClosed(json::Value const& msg)
     xrpl::LedgerHeader prev = builder_.header();
     xrpl::LedgerHeader header = prev;
     fillHeaderFromLedgerJson(header, msg);
-    if (prev.seq != 0 && prev.hash != beast::kZero && header.parentHash != beast::kZero &&
-        header.parentHash != prev.hash)
+    // ledgerClosed does not carry parent_hash. Keep the local chain:
+    // this close's parent is the ledger we just had.
+    bool const msgHasParent = msg.isMember(xrpl::jss::parent_hash) &&
+        msg[xrpl::jss::parent_hash].isString();
+    if (!msgHasParent && prev.hash != beast::kZero)
+        header.parentHash = prev.hash;
+    else if (
+        msgHasParent && prev.seq != 0 && prev.hash != beast::kZero &&
+        header.parentHash != beast::kZero && header.parentHash != prev.hash)
     {
         std::cerr << "sync WARNING parent " << shortHash(header.parentHash)
                   << " != local " << shortHash(prev.hash) << " at ledger " << header.seq
