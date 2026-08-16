@@ -175,7 +175,7 @@ cp cfg/edgy-xahau.example.cfg edgy-xahau.cfg
 
 Startup requires the upstream `server_state` to be `full`, `proposing`, or `unknown`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
 
-Pick the binary that matches the node. The two `libxrpl`s cannot live in one process. `edgy-xahaud` compiles xahaud RippleCalc/Flow from `XAHAUD_ROOT` and links xahaud `libxrpl.a`. Native JSON is `XAH`. Hook / URIToken objects stay as blobs; the book graph uses offers and lines.
+Pick the binary that matches the node. The two `libxrpl`s cannot live in one process. `edgy-xahaud` compiles xahaud RippleCalc/Flow from `XAHAUD_ROOT` and links xahaud `libxrpl.a`, so Hook / URIToken / HookState are known types. Native JSON is `XAH`. The book graph still uses offers, AMMs, and directories.
 
 ## Release build
 

@@ -254,8 +254,8 @@ applyJsonAffectedNodes(
             bool const deleted = kind.field == &xrpl::sfDeletedNode;
             bool const known = jsonTypeKnown(node);
 
-            // xahaud Hook / URIToken / HookState etc. are not in libxrpl.
-            // Still erase by index so the overlay stays honest.
+            // Types this libxrpl does not know (rippled vs xahaud differ).
+            // Still erase deletes by index so the overlay stays honest.
             if (!known)
             {
                 if (deleted)

@@ -155,7 +155,7 @@ Startup connects to `[node]` and requires `server_info.info.server_state` to be 
 
 Point XRPL clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Point Xahau clients at `ws://127.0.0.1:6018` or `http://127.0.0.1:5018` if you kept the example ports. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before expecting path results. `server_info` is forwarded to the upstream node. After each close, stderr should show `txs=N/N … inline with node`.
 
-On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks. Hook / URIToken / HookState objects are kept as blobs or skipped on apply; Offers, lines, accounts, and directories still update. Deletes of unknown types still erase by `LedgerIndex`.
+On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks. `edgy-xahaud` uses xahaud `libxrpl`, so Hook / URIToken / HookState parse as normal ledger objects. The book graph still only walks offers, AMMs, and directories.
 
 | Flag / stanza | Meaning |
 | --- | --- |
