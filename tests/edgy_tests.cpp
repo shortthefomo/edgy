@@ -13,6 +13,7 @@
 #include <xrpld/rpc/detail/Tuning.h>
 
 #include <xrpl/json/json_value.h>
+#include <xrpl/json/to_string.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
@@ -20,6 +21,7 @@
 #include <xrpl/protocol/Serializer.h>
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/SField.h>
+#include <xrpl/protocol/STParsedJSON.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/UintTypes.h>
@@ -102,6 +104,41 @@ main()
         auto drain = planApplyCycle(true, true, false);
         expect(!drain.exit && drain.takeBatch && !drain.tick,
                "stop + queued apply drains then does not tick");
+    }
+
+    {
+        // xrpld pubLedger sends ledgerClosed for N, then txs with ledger_index N.
+        expect(shouldApplyStreamTx(100, 100), "tx for the just-closed ledger applies");
+        expect(shouldApplyStreamTx(101, 100), "tx for the next ledger applies");
+        expect(!shouldApplyStreamTx(99, 100), "tx for an older ledger is skipped");
+        expect(shouldApplyStreamTx(0, 100), "tx with no ledger_index still applies");
+    }
+
+    {
+        // Stream JSON meta is parsed as sfGeneric; we must set CreatedNode
+        // or applyMetaNode returns None and the overlay never moves.
+        LedgerBuilder b;
+        LocalOrderBooks books;
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const key = xrpl::keylet::account(src).key;
+        json::Value meta{json::ValueType::Object};
+        json::Value& nodes = (meta["AffectedNodes"] = json::ValueType::Array);
+        json::Value& wrap = nodes.append(json::ValueType::Object);
+        json::Value& created = (wrap["CreatedNode"] = json::ValueType::Object);
+        created["LedgerEntryType"] = "AccountRoot";
+        created["LedgerIndex"] = to_string(key);
+        json::Value& fields = (created["NewFields"] = json::ValueType::Object);
+        fields["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        fields["Balance"] = "10000000000";
+        fields["Sequence"] = 1;
+        auto const stats = applyJsonAffectedNodes(b, books, meta);
+        expect(stats.parseFail == 0, "JSON AffectedNodes parse succeeds");
+        expect(stats.created == 1, "JSON CreatedNode increments created");
+        expect(stats.applied() == 1, "JSON CreatedNode is applied");
+        expect(b.contains(key), "JSON CreatedNode upserts the SLE");
+        auto view = b.publish();
+        expect(view->exists(xrpl::keylet::account(src)), "created account is readable");
+        expect(view->overlaySize() == 1 || view->size() == 1, "overlay/base holds the new object");
     }
 
     {

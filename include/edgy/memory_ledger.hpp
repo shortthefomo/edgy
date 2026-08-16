@@ -183,6 +183,10 @@ public:
     [[nodiscard]] bool
     contains(xrpl::uint256 const& key) const;
 
+    // Mutable clone of the current object, or nullptr if missing/deleted.
+    [[nodiscard]] xrpl::SLE::pointer
+    clone(xrpl::uint256 const& key) const;
+
     [[nodiscard]] xrpl::LedgerHeader const&
     header() const
     {

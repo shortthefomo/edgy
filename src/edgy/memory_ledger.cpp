@@ -513,6 +513,43 @@ LedgerBuilder::contains(xrpl::uint256 const& key) const
     return base_ && base_->items.contains(key);
 }
 
+xrpl::SLE::pointer
+LedgerBuilder::clone(xrpl::uint256 const& key) const
+{
+    MemoryLedger::Item const* item = nullptr;
+    if (overlay_)
+    {
+        if (auto const it = overlay_->find(key); it != overlay_->end())
+            item = it->second ? &*it->second : nullptr;
+        else if (base_)
+        {
+            if (auto const it = base_->items.find(key); it != base_->items.end())
+                item = &it->second;
+        }
+    }
+    else if (base_)
+    {
+        if (auto const it = base_->items.find(key); it != base_->items.end())
+            item = &it->second;
+    }
+    if (!item)
+        return nullptr;
+    try
+    {
+        if (item->sle)
+        {
+            return std::make_shared<xrpl::SLE>(
+                static_cast<xrpl::STObject const&>(*item->sle), key);
+        }
+        xrpl::SerialIter sit(xrpl::makeSlice(item->blob));
+        return std::make_shared<xrpl::SLE>(sit, key);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
 std::size_t
 LedgerBuilder::size() const
 {

@@ -10,7 +10,10 @@
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/json/json_value.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/RPCErr.h>
+#include <xrpl/protocol/STParsedJSON.h>
+#include <xrpl/protocol/detail/STVar.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STArray.h>
 #include <xrpl/protocol/STObject.h>
@@ -107,11 +110,19 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
         auto const key = node.getFieldH256(xrpl::sfLedgerIndex);
         if (deleted)
         {
-            if (node.isFieldPresent(xrpl::sfFinalFields))
+            if (auto cur = builder.clone(key))
+                books.removeFromSle(cur);
+            else if (node.isFieldPresent(xrpl::sfFinalFields))
             {
                 auto const& inner =
                     dynamic_cast<xrpl::STObject const&>(node.peekAtField(xrpl::sfFinalFields));
-                books.removeFromSle(sleFromMetaNode(node, inner, key));
+                try
+                {
+                    books.removeFromSle(sleFromMetaNode(node, inner, key));
+                }
+                catch (...)
+                {
+                }
             }
             builder.erase(key);
             return MetaApply::Deleted;
@@ -119,11 +130,31 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
         if (!innerField || !node.isFieldPresent(*innerField))
             return MetaApply::None;
         auto const& inner = dynamic_cast<xrpl::STObject const&>(node.peekAtField(*innerField));
-        auto sle = sleFromMetaNode(node, inner, key);
+
+        // Stream JSON FinalFields/NewFields are often partial. Merge onto
+        // the existing SLE (or a typed empty one) instead of constructing
+        // a full SLE, which throws on missing required fields.
+        auto sle = builder.clone(key);
+        if (!sle)
+        {
+            auto type = xrpl::ltANY;
+            if (node.isFieldPresent(xrpl::sfLedgerEntryType))
+                type = static_cast<xrpl::LedgerEntryType>(
+                    node.getFieldU16(xrpl::sfLedgerEntryType));
+            sle = std::make_shared<xrpl::SLE>(type, key);
+        }
+        for (int i = 0; i < inner.getCount(); ++i)
+        {
+            xrpl::detail::STVar var(inner.peekAtIndex(i));
+            sle->set(std::move(var.get()));
+        }
         if (!offerComplete(*sle))
         {
             books.removeFromSle(sle);
-            builder.erase(key);
+            if (sle->getType() == xrpl::ltOFFER)
+                builder.erase(key);
+            else
+                builder.upsert(sle);
             return MetaApply::Incomplete;
         }
         books.addFromSle(sle);
@@ -136,6 +167,76 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
         return MetaApply::None;
     }
 }
+
+}  // namespace
+
+StreamMetaStats
+applyJsonAffectedNodes(
+    LedgerBuilder& builder,
+    LocalOrderBooks& books,
+    json::Value const& meta)
+{
+    StreamMetaStats stats;
+    json::Value const* nodes = &meta;
+    if (meta.isObject() && meta.isMember("AffectedNodes") && meta["AffectedNodes"].isArray())
+        nodes = &meta["AffectedNodes"];
+    if (!nodes->isArray())
+        return stats;
+
+    auto note = [&](MetaApply kind) {
+        switch (kind)
+        {
+            case MetaApply::Created:
+                ++stats.created;
+                break;
+            case MetaApply::Modified:
+                ++stats.modified;
+                break;
+            case MetaApply::Deleted:
+                ++stats.deleted;
+                break;
+            case MetaApply::Incomplete:
+                ++stats.incomplete;
+                break;
+            case MetaApply::None:
+                ++stats.none;
+                break;
+        }
+    };
+
+    for (unsigned i = 0; i < nodes->size(); ++i)
+    {
+        auto const& item = (*nodes)[i];
+        if (!item.isObject())
+            continue;
+        struct Kind
+        {
+            char const* name;
+            xrpl::SField const* field;
+        };
+        for (Kind const kind : {
+                 Kind{"CreatedNode", &xrpl::sfCreatedNode},
+                 Kind{"ModifiedNode", &xrpl::sfModifiedNode},
+                 Kind{"DeletedNode", &xrpl::sfDeletedNode},
+             })
+        {
+            if (!item.isMember(kind.name) || !item[kind.name].isObject())
+                continue;
+            xrpl::STParsedJSONObject parsed(kind.name, item[kind.name]);
+            if (!parsed.object)
+            {
+                ++stats.parseFail;
+                continue;
+            }
+            // parseObject uses sfGeneric; applyMetaNode keys off the node name.
+            parsed.object->setFName(*kind.field);
+            note(applyMetaNode(builder, books, *parsed.object));
+        }
+    }
+    return stats;
+}
+
+namespace {
 
 std::uint32_t
 msgLedgerIndex(json::Value const& msg)
@@ -688,6 +789,7 @@ void
 Engine::loadSnapshot()
 {
     services_.books().clear();
+    prevCloseTxs_ = 0;
     resetApplyStats();
     {
         std::lock_guard lock(stateMutex_);
@@ -840,6 +942,7 @@ Engine::resetApplyStats()
 {
     applyTxs_ = 0;
     applyNoMeta_ = 0;
+    // prevCloseTxs_ is the last ledgerClosed txn_count; not cleared here.
     applyCreated_ = 0;
     applyDeleted_ = 0;
     applyModified_ = 0;
@@ -861,7 +964,9 @@ Engine::logSync(char const* what, xrpl::LedgerHeader const& header, json::Value 
     }
     auto const books = services_.books().bookCount();
     auto const nodeSeq = msgLedgerIndex(nodeMsg);
-    auto const nodeTxs = msgTxnCount(nodeMsg);
+    // Txs for ledger N arrive after ledgerClosed N. This line reports
+    // applies since the previous close against that close's txn_count.
+    auto const nodeTxs = prevCloseTxs_;
     bool const txOk = nodeTxs == 0 || (applyTxs_ + applyNoMeta_) == nodeTxs;
     bool const seqOk = nodeSeq == 0 || nodeSeq == header.seq;
 
@@ -931,6 +1036,7 @@ Engine::applyLedgerClosed(json::Value const& msg)
     publishBuilder(false);
     dirty_.store(false, std::memory_order_release);
     logSync("closed", header, msg);
+    prevCloseTxs_ = msgTxnCount(msg);
     resetApplyStats();
     if (auto cache = cache_)
         cache->expandIncompleteLines();
@@ -960,59 +1066,78 @@ Engine::applyTransaction(json::Value const& msg)
 {
     if (!ready_.load())
         return;
-    if (auto const seq = msgLedgerIndex(msg); seq != 0 && seq <= currentSeq_.load())
+    if (!shouldApplyStreamTx(msgLedgerIndex(msg), currentSeq_.load()))
         return;
     if (msg.isMember(xrpl::jss::validated) && msg[xrpl::jss::validated].isBool() &&
         !msg[xrpl::jss::validated].asBool())
         return;
     builder_.setOpen(true);
 
-    // Binary metadata only. JSON FinalFields applies were dropping offer
-    // amounts / BookDirectory and left BookTip stepping the same empty
-    // offer forever (Flow WRN flood).
+    json::Value const* metaJson = nullptr;
     std::string hex;
-    if (msg.isMember(xrpl::jss::meta) && msg[xrpl::jss::meta].isString())
-        hex = msg[xrpl::jss::meta].asString();
+    if (msg.isMember(xrpl::jss::meta))
+    {
+        if (msg[xrpl::jss::meta].isString())
+            hex = msg[xrpl::jss::meta].asString();
+        else if (msg[xrpl::jss::meta].isObject())
+            metaJson = &msg[xrpl::jss::meta];
+    }
     else if (msg.isMember("meta_blob") && msg["meta_blob"].isString())
         hex = msg["meta_blob"].asString();
-    if (hex.empty())
+    if (hex.empty() && !metaJson)
     {
         ++applyNoMeta_;
         return;
     }
-    auto const blob = xrpl::strUnHex(hex);
-    if (!blob)
-    {
-        ++applyNoMeta_;
-        return;
-    }
+
+    auto note = [this](MetaApply kind, bool& any) {
+        switch (kind)
+        {
+            case MetaApply::Created:
+                ++applyCreated_;
+                any = true;
+                break;
+            case MetaApply::Modified:
+                ++applyModified_;
+                any = true;
+                break;
+            case MetaApply::Deleted:
+                ++applyDeleted_;
+                any = true;
+                break;
+            case MetaApply::Incomplete:
+                ++applyIncomplete_;
+                any = true;
+                break;
+            case MetaApply::None:
+                break;
+        }
+    };
+
     try
     {
-        xrpl::TxMeta meta(xrpl::uint256{}, 0, *blob);
         bool any = false;
-        for (auto const& node : meta.getNodes())
+        if (metaJson)
         {
-            switch (applyMetaNode(builder_, services_.books(), node))
+            auto const stats = applyJsonAffectedNodes(builder_, services_.books(), *metaJson);
+            applyCreated_ += stats.created;
+            applyModified_ += stats.modified;
+            applyDeleted_ += stats.deleted;
+            applyIncomplete_ += stats.incomplete;
+            applyNoMeta_ += stats.parseFail;
+            any = stats.applied() != 0;
+        }
+        else
+        {
+            auto const blob = xrpl::strUnHex(hex);
+            if (!blob)
             {
-                case MetaApply::Created:
-                    ++applyCreated_;
-                    any = true;
-                    break;
-                case MetaApply::Modified:
-                    ++applyModified_;
-                    any = true;
-                    break;
-                case MetaApply::Deleted:
-                    ++applyDeleted_;
-                    any = true;
-                    break;
-                case MetaApply::Incomplete:
-                    ++applyIncomplete_;
-                    any = true;
-                    break;
-                case MetaApply::None:
-                    break;
+                ++applyNoMeta_;
+                return;
             }
+            xrpl::TxMeta meta(xrpl::uint256{}, 0, *blob);
+            for (auto const& node : meta.getNodes())
+                note(applyMetaNode(builder_, services_.books(), node), any);
         }
         ++applyTxs_;
         if (any)
