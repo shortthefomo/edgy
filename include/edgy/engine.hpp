@@ -28,6 +28,31 @@ namespace edgy {
 
 class ThreadPool;
 
+// Apply-thread cycle after wait_for(update-ms). Empty queue must still
+// tick so path_find subscriptions reprice every 100ms, not only on close.
+struct ApplyCyclePlan
+{
+    bool exit{false};
+    bool hold{false};
+    bool takeBatch{false};
+    bool tick{false};
+};
+
+[[nodiscard]] inline ApplyCyclePlan
+planApplyCycle(bool stop, bool ready, bool queueEmpty) noexcept
+{
+    if (stop && queueEmpty)
+        return {.exit = true};
+    if (!ready)
+        return {.hold = true};
+    return {
+        .exit = false,
+        .hold = false,
+        .takeBatch = !queueEmpty,
+        .tick = !stop,
+    };
+}
+
 class Engine
 {
 public:

@@ -79,6 +79,29 @@ main()
         expect(d.searchFast == Config::kSearchFull, "default [search-fast] is full");
         expect(d.searchTimeout.count() == 0, "default [timeout-ms] is none");
         expect(d.fullSnapshot, "default [full-snapshot] is full");
+        expect(d.midCloseDelay.count() == 100, "default [update-ms] is 100");
+    }
+
+    {
+        // Regression: empty apply queue skipped midCloseTick, so path_find
+        // updates only went out on ledger close (~4s) instead of 100ms.
+        auto idle = planApplyCycle(false, true, true);
+        expect(!idle.exit && !idle.hold && !idle.takeBatch && idle.tick,
+               "ready + empty queue still ticks (100ms path_find updates)");
+        auto work = planApplyCycle(false, true, false);
+        expect(!work.exit && !work.hold && work.takeBatch && work.tick,
+               "ready + queued apply takes a batch and ticks");
+        auto snap = planApplyCycle(false, false, false);
+        expect(!snap.exit && snap.hold && !snap.takeBatch && !snap.tick,
+               "snapshot hold does not apply or tick");
+        auto snapIdle = planApplyCycle(false, false, true);
+        expect(!snapIdle.exit && snapIdle.hold && !snapIdle.tick,
+               "snapshot hold with empty queue does not tick");
+        auto halt = planApplyCycle(true, true, true);
+        expect(halt.exit, "stop + empty queue exits the apply loop");
+        auto drain = planApplyCycle(true, true, false);
+        expect(!drain.exit && drain.takeBatch && !drain.tick,
+               "stop + queued apply drains then does not tick");
     }
 
     {
