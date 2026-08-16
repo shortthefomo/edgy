@@ -5,8 +5,10 @@
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/base_uint.h>
 #include <xrpl/beast/utility/Journal.h>
+#ifndef EDGY_XAHAU
 #include <xrpl/core/ServiceRegistry.h>
 #include <xrpl/server/LoadFeeTrack.h>
+#endif
 
 #include <boost/asio/io_context.hpp>
 
@@ -23,18 +25,34 @@ namespace edgy {
  * RippleCalc only needs getJournal(). Pathfinder needs getOrderBookDB(),
  * getFeeTrack(), and getJournal(). Every other accessor throws.
  */
+#ifdef EDGY_XAHAU
+class PathServices
+#else
 class PathServices final : public xrpl::ServiceRegistry
+#endif
 {
 public:
+#ifdef EDGY_XAHAU
+    explicit PathServices(
+        boost::asio::io_context& io,
+        beast::severities::Severity level = beast::severities::kError)
+#else
     explicit PathServices(boost::asio::io_context& io, beast::Severity level = beast::Severity::Error)
+#endif
         : io_(io)
         , logs_(level)
+#ifndef EDGY_XAHAU
         , feeTrack_(logs_.journal("LoadFeeTrack"))
+#endif
         , books_(std::make_unique<LocalOrderBooks>())
     {
         // Flow logs every unfunded/degenerate AMM at Error; path_find
         // walks thousands of them. Keep the process usable.
+#ifdef EDGY_XAHAU
+        logs_.get("Flow").threshold(beast::severities::kFatal);
+#else
         logs_.get("Flow").threshold(beast::Severity::Fatal);
+#endif
     }
 
     LocalOrderBooks&
@@ -55,6 +73,7 @@ public:
         stopping_.store(true, std::memory_order_release);
     }
 
+#ifndef EDGY_XAHAU
     xrpl::CollectorManager&
     getCollectorManager() override
     {
@@ -289,30 +308,6 @@ public:
         throw unused("getPerfLog");
     }
 
-    [[nodiscard]] bool
-    isStopping() const override
-    {
-        return stopping_.load(std::memory_order_acquire);
-    }
-
-    beast::Journal
-    getJournal(std::string const& name) override
-    {
-        return logs_.journal(name);
-    }
-
-    boost::asio::io_context&
-    getIOContext() override
-    {
-        return io_;
-    }
-
-    xrpl::Logs&
-    getLogs() override
-    {
-        return logs_;
-    }
-
     [[nodiscard]] std::optional<xrpl::uint256> const&
     getTrapTxID() const override
     {
@@ -330,6 +325,43 @@ public:
     {
         throw unused("getApp");
     }
+#endif
+
+    [[nodiscard]] bool
+    isStopping() const
+#ifndef EDGY_XAHAU
+        override
+#endif
+    {
+        return stopping_.load(std::memory_order_acquire);
+    }
+
+    beast::Journal
+    getJournal(std::string const& name)
+#ifndef EDGY_XAHAU
+        override
+#endif
+    {
+        return logs_.journal(name);
+    }
+
+    boost::asio::io_context&
+    getIOContext()
+#ifndef EDGY_XAHAU
+        override
+#endif
+    {
+        return io_;
+    }
+
+    xrpl::Logs&
+    getLogs()
+#ifndef EDGY_XAHAU
+        override
+#endif
+    {
+        return logs_;
+    }
 
 private:
     [[noreturn]] static std::logic_error
@@ -340,7 +372,9 @@ private:
 
     boost::asio::io_context& io_;
     xrpl::Logs logs_;
+#ifndef EDGY_XAHAU
     xrpl::LoadFeeTrack feeTrack_;
+#endif
     std::unique_ptr<LocalOrderBooks> books_;
     std::atomic<bool> stopping_{false};
     std::optional<xrpl::uint256> trapTxID_;

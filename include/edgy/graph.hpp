@@ -1,6 +1,6 @@
 #pragma once
 
-#include <xrpl/core/ServiceRegistry.h>
+#include <edgy/services.hpp>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Asset.h>
@@ -81,7 +81,7 @@ public:
     static FastPathResult
     search(
         LocalOrderBooks& books,
-        xrpl::ServiceRegistry& registry,
+        PathServices& services,
         std::shared_ptr<xrpl::ReadView const> const& ledger,
         xrpl::AccountID const& src,
         xrpl::AccountID const& dst,

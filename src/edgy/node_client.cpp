@@ -134,7 +134,7 @@ public:
 
         json::Value req = params;
         if (!req.isObject())
-            req = json::Value{json::ValueType::Object};
+            req = json::Value{edgy::kJsonObject};
         req[xrpl::jss::id] = id;
         req[xrpl::jss::command] = command;
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <edgy/compat.hpp>
+
 #include <xrpl/basics/Blob.h>
 #include <xrpl/basics/UnorderedContainers.h>
 #include <xrpl/basics/base_uint.h>
@@ -42,7 +44,7 @@ public:
     struct Item
     {
         xrpl::Blob blob;
-        mutable xrpl::SLE::const_pointer sle;
+        mutable std::shared_ptr<xrpl::SLE const> sle;
     };
 
     struct Base
@@ -63,8 +65,22 @@ public:
         std::shared_ptr<Overlay const> overlay,
         bool open = false);
 
+#ifdef EDGY_XAHAU
+    using SlesType = sles_type;
+    using TxsType = txs_type;
+
+    [[nodiscard]] xrpl::LedgerInfo const&
+    info() const override;
+
+    [[nodiscard]] xrpl::LedgerHeader const&
+    header() const
+    {
+        return header_;
+    }
+#else
     [[nodiscard]] xrpl::LedgerHeader const&
     header() const override;
+#endif
 
     [[nodiscard]] bool
     open() const override;
@@ -81,7 +97,7 @@ public:
     [[nodiscard]] std::optional<key_type>
     succ(key_type const& key, std::optional<key_type> const& last = std::nullopt) const override;
 
-    [[nodiscard]] xrpl::SLE::const_pointer
+    [[nodiscard]] std::shared_ptr<xrpl::SLE const>
     read(xrpl::Keylet const& k) const override;
 
     [[nodiscard]] std::unique_ptr<SlesType::iter_base>
@@ -114,7 +130,7 @@ public:
     [[nodiscard]] std::size_t
     overlaySize() const;
 
-    [[nodiscard]] xrpl::SLE::const_pointer
+    [[nodiscard]] std::shared_ptr<xrpl::SLE const>
     sleOf(xrpl::uint256 const& key) const;
 
 private:
@@ -130,7 +146,7 @@ private:
     [[nodiscard]] std::optional<key_type>
     firstKey() const;
 
-    [[nodiscard]] xrpl::SLE::const_pointer
+    [[nodiscard]] std::shared_ptr<xrpl::SLE const>
     materialize(xrpl::uint256 const& key, Item const& item) const;
 
     xrpl::LedgerHeader header_;
@@ -176,13 +192,13 @@ public:
     reserve(std::size_t n);
 
     void
-    upsert(xrpl::SLE::const_pointer sle);
+    upsert(std::shared_ptr<xrpl::SLE const> sle);
 
     void
     upsertRaw(
         xrpl::uint256 const& key,
         xrpl::Blob blob,
-        xrpl::SLE::const_pointer decoded = {});
+        std::shared_ptr<xrpl::SLE const> decoded = {});
 
     void
     erase(xrpl::uint256 const& key);
@@ -194,7 +210,7 @@ public:
     contains(xrpl::uint256 const& key) const;
 
     // Mutable clone of the current object, or nullptr if missing/deleted.
-    [[nodiscard]] xrpl::SLE::pointer
+    [[nodiscard]] std::shared_ptr<xrpl::SLE>
     clone(xrpl::uint256 const& key) const;
 
     [[nodiscard]] xrpl::LedgerHeader const&

@@ -1,17 +1,22 @@
 #include <edgy/engine.hpp>
 
+#include <edgy/compat.hpp>
 #include <edgy/protocol.hpp>
 #include <edgy/thread_pool.hpp>
 
+#ifndef EDGY_XAHAU
 #include <xrpld/rpc/detail/Pathfinder.h>
+#endif
 #include <xrpld/rpc/detail/Tuning.h>
 
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/StringUtilities.h>
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/json/json_value.h>
+#include <xrpl/json/to_string.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/ErrorCodes.h>
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/STParsedJSON.h>
 #include <xrpl/protocol/detail/STVar.h>
@@ -23,6 +28,7 @@
 #include <xrpl/protocol/jss.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -185,6 +191,47 @@ applyJsonAffectedNodes(
         }
     };
 
+    auto jsonLedgerIndex = [](json::Value const& node, xrpl::uint256& key) {
+        if (!node.isMember("LedgerIndex") || !node["LedgerIndex"].isString())
+            return false;
+        return key.parseHex(node["LedgerIndex"].asString());
+    };
+
+    auto jsonTypeKnown = [](json::Value const& node) {
+        if (!node.isMember("LedgerEntryType"))
+            return false;
+        auto const& t = node["LedgerEntryType"];
+        if (t.isString())
+        {
+            try
+            {
+                (void)xrpl::LedgerFormats::getInstance().findTypeByName(t.asString());
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+        if (t.isIntegral())
+        {
+            auto const type = static_cast<xrpl::LedgerEntryType>(t.asUInt());
+            return xrpl::LedgerFormats::getInstance().findByType(type) != nullptr;
+        }
+        return false;
+    };
+
+    auto logParseFail = [](json::Value const& node, json::Value const& err) {
+        static std::atomic<int> n{0};
+        if (n.fetch_add(1) >= 8)
+            return;
+        std::string type = "?";
+        if (node.isMember("LedgerEntryType") && node["LedgerEntryType"].isString())
+            type = node["LedgerEntryType"].asString();
+        std::cerr << "apply JSON parse_fail type=" << type << " "
+                  << json::to_string(err) << '\n';
+    };
+
     for (unsigned i = 0; i < nodes->size(); ++i)
     {
         auto const& item = (*nodes)[i];
@@ -204,11 +251,41 @@ applyJsonAffectedNodes(
             if (!item.isMember(kind.name) || !item[kind.name].isObject())
                 continue;
             json::Value node = item[kind.name];
-            stripUnknownJsonFields(node);
+            bool const deleted = kind.field == &xrpl::sfDeletedNode;
+            bool const known = jsonTypeKnown(node);
+
+            // Types this libxrpl does not know (rippled vs xahaud differ).
+            // Still erase deletes by index so the overlay stays honest.
+            if (!known)
+            {
+                if (deleted)
+                {
+                    xrpl::uint256 key;
+                    if (jsonLedgerIndex(node, key))
+                    {
+                        if (auto cur = builder.clone(key))
+                            books.removeFromSle(cur);
+                        builder.erase(key);
+                        ++stats.deleted;
+                    }
+                    else
+                    {
+                        ++stats.skippedUnknown;
+                    }
+                }
+                else
+                {
+                    ++stats.skippedUnknown;
+                }
+                continue;
+            }
+
+            slimJsonMetaNode(node);
             xrpl::STParsedJSONObject parsed(kind.name, node);
             if (!parsed.object)
             {
                 ++stats.parseFail;
+                logParseFail(node, parsed.error);
                 continue;
             }
             // parseObject uses sfGeneric; applyMetaNode keys off the node name.
@@ -308,7 +385,9 @@ Engine::Engine(boost::asio::io_context& io, Config cfg, std::shared_ptr<NodeClie
     , services_(io)
     , pool_(std::make_unique<ThreadPool>(static_cast<std::size_t>(cfg_.workers)))
 {
+#ifndef EDGY_XAHAU
     xrpl::Pathfinder::initPathTable();
+#endif
 }
 
 Engine::~Engine()
@@ -361,7 +440,7 @@ Engine::ledger() const
 json::Value
 Engine::statusJson() const
 {
-    json::Value j{json::ValueType::Object};
+    json::Value j{kJsonObject};
     std::lock_guard lock(stateMutex_);
     j["server_state"] = ready_.load() ? "full" : "syncing";
     j["load_factor"] = 1;
@@ -372,7 +451,7 @@ Engine::statusJson() const
         j[xrpl::jss::ledger_index] = seq;
         j[xrpl::jss::ledger_hash] = to_string(published_->header().hash);
         j[xrpl::jss::complete_ledgers] = std::to_string(first) + "-" + std::to_string(seq);
-        json::Value vl{json::ValueType::Object};
+        json::Value vl{kJsonObject};
         vl[xrpl::jss::seq] = seq;
         vl[xrpl::jss::hash] = to_string(published_->header().hash);
         vl["base_fee_xrp"] = 0.00001;
@@ -421,7 +500,7 @@ Engine::noteSearchMs(std::uint64_t ms)
 json::Value
 Engine::pathCountsJson() const
 {
-    json::Value j{json::ValueType::Object};
+    json::Value j{kJsonObject};
     auto setU64 = [](json::Value& obj, char const* key, std::uint64_t v) {
         obj[key] = static_cast<double>(v);
     };
@@ -688,8 +767,8 @@ Engine::syncLoop()
             // triggers another full snapshot.
             if (!subscribed)
             {
-                json::Value sub{json::ValueType::Object};
-                sub[xrpl::jss::streams] = json::Value{json::ValueType::Array};
+                json::Value sub{kJsonObject};
+                sub[xrpl::jss::streams] = json::Value{kJsonArray};
                 sub[xrpl::jss::streams].append("ledger");
                 sub[xrpl::jss::streams].append("transactions");
                 sub[xrpl::jss::binary] = true;
@@ -710,7 +789,7 @@ Engine::syncLoop()
             if (auto view = ledger())
             {
                 std::cerr << "sync ready ledger " << view->seq() << " "
-                          << shortHash(view->header().hash) << " objects=" << objects_.load()
+                          << shortHash(viewHeader(*view).hash) << " objects=" << objects_.load()
                           << " books=" << services_.books().bookCount()
                           << "; following node closes\n";
             }
@@ -787,7 +866,7 @@ Engine::loadSnapshot()
     }
     builder_.clear();
     builder_.reserve(25'000'000);
-    json::Value ledgerReq{json::ValueType::Object};
+    json::Value ledgerReq{kJsonObject};
     ledgerReq[xrpl::jss::ledger_index] = "validated";
     auto ledgerRes = node_->request("ledger", ledgerReq, std::chrono::minutes{2});
     if (ledgerRes.isMember(xrpl::jss::error))
@@ -813,7 +892,7 @@ Engine::loadSnapshot()
         {
             if (stop_.load())
                 throw std::runtime_error("stopped");
-            json::Value req{json::ValueType::Object};
+            json::Value req{kJsonObject};
             // String index: Clio/public hubs accept it; numeric can fail.
             req[xrpl::jss::ledger_index] = std::to_string(header.seq);
             req[xrpl::jss::binary] = true;
@@ -936,6 +1015,7 @@ Engine::resetApplyStats()
     applyTxs_ = 0;
     applyNoMeta_ = 0;
     applyParseFail_ = 0;
+    applySkipped_ = 0;
     // prevCloseTxs_ is the last ledgerClosed txn_count; not cleared here.
     applyCreated_ = 0;
     applyDeleted_ = 0;
@@ -973,6 +1053,8 @@ Engine::logSync(char const* what, xrpl::LedgerHeader const& header, json::Value 
         std::cerr << " no_meta=" << applyNoMeta_;
     if (applyParseFail_ != 0)
         std::cerr << " parse_fail=" << applyParseFail_;
+    if (applySkipped_ != 0)
+        std::cerr << " skipped=" << applySkipped_;
     std::cerr << " created=" << applyCreated_ << " deleted=" << applyDeleted_
               << " modified=" << applyModified_;
     if (applyIncomplete_ != 0)
@@ -1121,6 +1203,7 @@ Engine::applyTransaction(json::Value const& msg)
             applyDeleted_ += stats.deleted;
             applyIncomplete_ += stats.incomplete;
             applyParseFail_ += stats.parseFail;
+            applySkipped_ += stats.skippedUnknown;
             any = stats.applied() != 0;
         }
         else
@@ -1428,7 +1511,7 @@ json::Value
 Engine::ledgerClosedJson() const
 {
     std::lock_guard lock(stateMutex_);
-    json::Value j{json::ValueType::Object};
+    json::Value j{kJsonObject};
     j[xrpl::jss::type] = "ledgerClosed";
     auto const seq = published_ ? published_->seq() : currentSeq_.load();
     if (seq == 0)

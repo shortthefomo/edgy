@@ -1,6 +1,8 @@
 #include <edgy/graph.hpp>
 
+#include <edgy/compat.hpp>
 #include <edgy/order_books.hpp>
+#include <edgy/ripple_calc.hpp>
 
 #include <xrpld/rpc/detail/PathfinderUtils.h>
 #include <xrpld/rpc/detail/Tuning.h>
@@ -30,21 +32,7 @@ namespace {
 xrpl::STPathElement
 bookElement(xrpl::Asset const& out)
 {
-    if (xrpl::isXRP(out))
-    {
-        return xrpl::STPathElement(
-            xrpl::STPathElement::TypeCurrency,
-            xrpl::xrpAccount(),
-            xrpl::xrpCurrency(),
-            xrpl::xrpAccount());
-    }
-    auto const assetType =
-        out.holds<xrpl::Issue>() ? xrpl::STPathElement::TypeCurrency : xrpl::STPathElement::TypeMpt;
-    return xrpl::STPathElement(
-        assetType | xrpl::STPathElement::TypeIssuer,
-        xrpl::xrpAccount(),
-        out,
-        out.getIssuer());
+    return bookPathElement(out);
 }
 
 xrpl::STPath
@@ -53,7 +41,7 @@ bookPath(std::vector<xrpl::Asset> const& hops)
     xrpl::STPath path;
     path.reserve(hops.size());
     for (auto const& hop : hops)
-        path.emplaceBack(bookElement(hop));
+        pathPush(path, bookElement(hop));
     return path;
 }
 
@@ -72,7 +60,8 @@ srcMaxAmount(
             return xrpl::xrpAccount();
         return srcAccount;
     }();
-    return srcAsset.visit(
+    return visitAsset(
+        srcAsset,
         [&](xrpl::Issue const& issue) {
             return xrpl::STAmount(xrpl::Issue{issue.currency, sourceAccount}, 1u, 0, true);
         },
@@ -87,10 +76,7 @@ addPath(xrpl::STPathSet& set, xrpl::STPath path)
         return;
     if (set.size() >= 256)
         return;
-    // STPathSet::pushBack does not skip duplicates.
-    if (set.contains(path))
-        return;
-    set.pushBack(std::move(path));
+    pathSetPush(set, std::move(path));
 }
 
 // Currency sequence only — same hops / different issuers look identical
@@ -102,7 +88,7 @@ hopCurrencyKey(xrpl::STPath const& path)
     key.reserve(path.size() * 16);
     for (auto const& el : path)
     {
-        key += to_string(el.getPathAsset());
+        key += pathElementKey(el);
         key.push_back('/');
     }
     return key;
@@ -238,7 +224,7 @@ SearchBudget::depthFor(
 FastPathResult
 FastPathFinder::search(
     LocalOrderBooks& books,
-    xrpl::ServiceRegistry& registry,
+    PathServices& services,
     std::shared_ptr<xrpl::ReadView const> const& ledger,
     xrpl::AccountID const& src,
     xrpl::AccountID const& dst,
@@ -254,7 +240,7 @@ FastPathFinder::search(
     FastPathResult result;
     result.depth = budget.depth;
     auto const t0 = std::chrono::steady_clock::now();
-    auto j = registry.getJournal("FastPath");
+    auto j = services.getJournal("FastPath");
 
     if (!ledger)
         return result;
@@ -445,7 +431,7 @@ FastPathFinder::search(
             continue;
         ++ranked;
         xrpl::STPathSet one;
-        one.pushBack(path);
+        pathSetPushAlways(one, path);
 
         xrpl::path::RippleCalc::Input rcInput;
         rcInput.defaultPathsAllowed = false;
@@ -454,8 +440,8 @@ FastPathFinder::search(
         try
         {
             xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-            auto rc = xrpl::path::RippleCalc::rippleCalculate(
-                sandbox, saMax, saMinDst, dst, src, one, domain, registry, &rcInput);
+            auto rc = rippleCalculate(
+                sandbox, saMax, saMinDst, dst, src, one, domain, services, &rcInput);
             if (!xrpl::isTesSuccess(rc.result()))
                 continue;
 
@@ -501,8 +487,8 @@ FastPathFinder::search(
             if (!chosen.insert(hopCurrencyKey(path)).second)
                 continue;
             if (static_cast<int>(result.paths.size()) < SearchBudget::kMaxPathCount)
-                result.paths.pushBack(path);
-            result.discovered.pushBack(path);
+                pathSetPushAlways(result.paths, path);
+            pathSetPushAlways(result.discovered, path);
         }
     };
     // Book pairs (1–2 hops) first so 3-hop hub chains cannot hide
@@ -518,7 +504,7 @@ FastPathFinder::search(
             continue;
         if (!chosen.insert(hopCurrencyKey(path)).second)
             continue;
-        result.discovered.pushBack(path);
+        pathSetPushAlways(result.discovered, path);
     }
 
     result.ranked = static_cast<int>(ranks.size());

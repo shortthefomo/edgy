@@ -19,11 +19,9 @@ void
 usage()
 {
     std::cerr
-        << "Usage: edgy [options] [edgy.cfg]\n"
+        << "Usage: edgy-xrpld|edgy-xahaud [options] [edgy-xrpl.cfg|edgy-xahau.cfg]\n"
         << "  --conf <file>               xrpld-style config (stanzas)\n"
-        << "  --node <ws://host:port>     Upstream xrpld/xahaud WebSocket\n"
-        << "  --network <xrpl|xahau>      Ledger family of [node] (default xrpl)\n"
-        << "  --xahau                     Same as --network xahau\n"
+        << "  --node <ws://host:port>     Upstream node WebSocket\n"
         << "  --listen-ws <host:port>     Local WebSocket\n"
         << "  --listen-rpc <host:port>    Local JSON-RPC HTTP\n"
         << "  --workers <n>               Concurrent path_find workers\n"
@@ -37,7 +35,7 @@ usage()
         << "  --help\n"
         << "\n"
         << "File stanzas (value on the following line, like xrpld.cfg):\n"
-        << "  [node]  [network]  [listen-ws]  [listen-rpc]  [workers]  [net-threads]\n"
+        << "  [node]  [listen-ws]  [listen-rpc]  [workers]  [net-threads]\n"
         << "  [update-ms]  [proxy]  [debug]\n"
         << "  [search]  [search-fast]  [timeout-ms]  [full-snapshot]\n"
         << "  [max_total_lines]  [max_lines_per_account]\n"
@@ -113,15 +111,12 @@ parseSnapshot(std::string const& v)
     return parseFlag(v);
 }
 
-NetworkKind
-parseNetwork(std::string const& v)
+[[noreturn]] void
+rejectedNetworkSwitch(char const* how)
 {
-    auto const s = normalizeName(v);
-    if (s == "xrpl" || s == "xrpld" || s == "xrp" || s == "ripple")
-        return NetworkKind::xrpl;
-    if (s == "xahau" || s == "xahaud" || s == "xah")
-        return NetworkKind::xahau;
-    throw std::runtime_error("invalid [network] (want xrpl or xahau): " + v);
+    throw std::runtime_error(
+        std::string(how) +
+        " is gone; run edgy-xrpld against xrpld or edgy-xahaud against xahaud");
 }
 
 std::chrono::milliseconds
@@ -164,7 +159,7 @@ applyScalar(Config& cfg, std::string const& section, std::string const& value)
     else if (section == "full-snapshot")
         cfg.fullSnapshot = parseSnapshot(value);
     else if (section == "network" || section == "node-type")
-        cfg.network = parseNetwork(value);
+        ;  // leftover from the single-binary switch; family is the executable
     else if (section == "max-total-lines")
         cfg.maxTotalLines = static_cast<std::size_t>(std::stoull(value));
     else if (section == "max-lines-per-account")
@@ -320,17 +315,10 @@ Config::fromArgs(int argc, char** argv)
         {
             cli.emplace_back("node", need("--node"));
         }
-        else if (arg == "--network")
+        else if (arg == "--network" || arg == "--xahau" || arg == "--xahaud" ||
+                 arg == "--xrpl" || arg == "--xrpld")
         {
-            cli.emplace_back("network", need("--network"));
-        }
-        else if (arg == "--xahau" || arg == "--xahaud")
-        {
-            cli.emplace_back("network", "xahau");
-        }
-        else if (arg == "--xrpl" || arg == "--xrpld")
-        {
-            cli.emplace_back("network", "xrpl");
+            rejectedNetworkSwitch(std::string(arg).c_str());
         }
         else if (arg == "--listen-ws")
         {
@@ -390,12 +378,26 @@ Config::fromArgs(int argc, char** argv)
 
     if (confPath.empty())
     {
-        for (char const* candidate : {
-                 "edgy.cfg",
-                 "cfg/edgy.cfg",
-                 "pathfinder.cfg",
-                 "cfg/pathfinder.cfg",
-             })
+#ifdef EDGY_XAHAU
+        static char const* const kCandidates[] = {
+            "edgy-xahau.cfg",
+            "cfg/edgy-xahau.cfg",
+            "edgy.cfg",
+            "cfg/edgy.cfg",
+            "pathfinder.cfg",
+            "cfg/pathfinder.cfg",
+        };
+#else
+        static char const* const kCandidates[] = {
+            "edgy-xrpl.cfg",
+            "cfg/edgy-xrpl.cfg",
+            "edgy.cfg",
+            "cfg/edgy.cfg",
+            "pathfinder.cfg",
+            "cfg/pathfinder.cfg",
+        };
+#endif
+        for (char const* candidate : kCandidates)
         {
             std::ifstream probe(candidate);
             if (probe)
@@ -414,8 +416,8 @@ Config::fromArgs(int argc, char** argv)
     else if (auto const* env = std::getenv("PATHFINDER_NODE"))
         cfg.nodeWs = env;
 
-    if (auto const* env = std::getenv("EDGY_NETWORK"))
-        cfg.network = parseNetwork(env);
+    if (std::getenv("EDGY_NETWORK"))
+        rejectedNetworkSwitch("EDGY_NETWORK");
 
     for (auto const& [section, value] : cli)
         applyScalar(cfg, std::string{section}, value);

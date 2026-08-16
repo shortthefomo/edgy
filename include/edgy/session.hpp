@@ -1,8 +1,9 @@
 #pragma once
 
+#include <edgy/compat.hpp>
+#include <edgy/services.hpp>
 #include <xrpld/rpc/detail/AssetCache.h>
 
-#include <xrpl/core/ServiceRegistry.h>
 #include <xrpl/json/json_value.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/protocol/AccountID.h>
@@ -35,7 +36,7 @@ class PathSession
 {
 public:
     PathSession(
-        xrpl::ServiceRegistry& registry,
+        PathServices& services,
         Config const& cfg,
         int id,
         bool oneShot,
@@ -136,7 +137,7 @@ private:
         json::Value& jvArray,
         std::shared_ptr<xrpl::ReadView const> const& calcLedger);
 
-    xrpl::ServiceRegistry& registry_;
+    PathServices& registry_;
     Config const& cfg_;
     beast::Journal journal_;
     int const id_;
@@ -145,7 +146,7 @@ private:
     std::recursive_mutex lock_;
 
     json::Value jvId_;
-    json::Value jvStatus_{json::ValueType::Object};
+    json::Value jvStatus_{kJsonObject};
 
     std::optional<xrpl::AccountID> src_;
     std::optional<xrpl::AccountID> dst_;

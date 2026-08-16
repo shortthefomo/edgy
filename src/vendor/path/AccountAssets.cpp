@@ -1,5 +1,7 @@
 #include <xrpld/rpc/detail/AccountAssets.h>
 
+#include <edgy/compat.hpp>
+
 #include <xrpld/rpc/detail/AssetCache.h>
 #include <xrpld/rpc/detail/TrustLine.h>
 
@@ -46,6 +48,7 @@ accountSourceAssets(
 
     assets.erase(badCurrency());
 
+#ifndef EDGY_XAHAU
     if (auto const mpts = lrCache->getMPTs(account))
     {
         for (auto const& rspEntry : *mpts)
@@ -54,6 +57,7 @@ accountSourceAssets(
                 assets.insert(rspEntry.getMptID());
         }
     }
+#endif
 
     return assets;
 }
@@ -84,6 +88,7 @@ accountDestAssets(
 
     assets.erase(badCurrency());
 
+#ifndef EDGY_XAHAU
     if (auto const mpts = lrCache->getMPTs(account))
     {
         for (auto const& rspEntry : *mpts)
@@ -92,6 +97,7 @@ accountDestAssets(
                 assets.insert(rspEntry.getMptID());
         }
     }
+#endif
 
     return assets;
 }

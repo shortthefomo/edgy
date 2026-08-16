@@ -51,10 +51,10 @@ public:
         std::optional<xrpl::Domain> const& domain = std::nullopt) override;
 
     void
-    addFromSle(xrpl::SLE::const_ref sle);
+    addFromSle(std::shared_ptr<xrpl::SLE const> const& sle);
 
     void
-    removeFromSle(xrpl::SLE::const_ref sle);
+    removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle);
 
     void
     clear();

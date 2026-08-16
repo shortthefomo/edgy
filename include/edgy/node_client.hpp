@@ -1,5 +1,7 @@
 #pragma once
 
+#include <edgy/compat.hpp>
+
 #include <xrpl/json/json_value.h>
 
 #include <boost/asio/io_context.hpp>
@@ -48,7 +50,7 @@ public:
     Json
     request(
         std::string const& command,
-        Json params = Json{json::ValueType::Object},
+        Json params = Json{kJsonObject},
         std::chrono::milliseconds timeout = std::chrono::seconds{30});
 
     void

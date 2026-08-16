@@ -1,8 +1,10 @@
 #include <edgy/session.hpp>
 
+#include <edgy/compat.hpp>
 #include <edgy/config.hpp>
 #include <edgy/graph.hpp>
 #include <edgy/protocol.hpp>
+#include <edgy/ripple_calc.hpp>
 #include <edgy/services.hpp>
 
 #include <xrpld/rpc/detail/AccountAssets.h>
@@ -21,7 +23,9 @@
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/jss.h>
+#ifndef EDGY_XAHAU
 #include <xrpl/server/LoadFeeTrack.h>
+#endif
 #include <xrpl/tx/paths/RippleCalc.h>
 
 #include <algorithm>
@@ -53,7 +57,7 @@ cappedPaths(xrpl::STPathSet const& paths)
     auto const n = std::min(
         paths.size(), static_cast<std::size_t>(xrpl::rpc::tuning::kPathFindMaxPaths));
     for (std::size_t i = 0; i < n; ++i)
-        out.pushBack(paths[i]);
+        pathSetPushAlways(out, paths[i]);
     return out;
 }
 
@@ -64,11 +68,11 @@ setClosedLedgerIdentity(json::Value& dest, std::shared_ptr<xrpl::ReadView const>
         return;
     if (!view->open())
     {
-        dest[xrpl::jss::ledger_hash] = to_string(view->header().hash);
+        dest[xrpl::jss::ledger_hash] = to_string(viewHeader(*view).hash);
         dest[xrpl::jss::ledger_index] = view->seq();
         return;
     }
-    auto const& header = view->header();
+    auto const& header = viewHeader(*view);
     if (header.seq > 0 && header.parentHash != beast::kZero)
     {
         dest[xrpl::jss::ledger_hash] = to_string(header.parentHash);
@@ -117,8 +121,8 @@ setPathFindNotice(json::Value& dest, PathWarn code)
 
     dest[xrpl::jss::warning] = token;
     if (!dest.isMember(xrpl::jss::warnings) || !dest[xrpl::jss::warnings].isArray())
-        dest[xrpl::jss::warnings] = json::Value{json::ValueType::Array};
-    json::Value& w = dest[xrpl::jss::warnings].append(json::ValueType::Object);
+        dest[xrpl::jss::warnings] = json::Value{kJsonArray};
+    json::Value& w = dest[xrpl::jss::warnings].append(kJsonObject);
     w[xrpl::jss::id] = code;
     w[xrpl::jss::message] = message;
 }
@@ -126,7 +130,7 @@ setPathFindNotice(json::Value& dest, PathWarn code)
 }  // namespace
 
 PathSession::PathSession(
-    xrpl::ServiceRegistry& registry,
+    PathServices& registry,
     Config const& cfg,
     int id,
     bool oneShot,
@@ -247,6 +251,10 @@ PathSession::parseJson(json::Value const& jvIn)
             }
             else
             {
+#ifdef EDGY_XAHAU
+                jvStatus_ = xrpl::rpcError(xrpl::RpcSrcCurMalformed);
+                return kPjInvalid;
+#else
                 xrpl::uint192 u;
                 if (!c[xrpl::jss::mpt_issuance_id].isString() ||
                     !u.parseHex(c[xrpl::jss::mpt_issuance_id].asString()))
@@ -255,6 +263,7 @@ PathSession::parseJson(json::Value const& jvIn)
                     return kPjInvalid;
                 }
                 srcPathAsset = u;
+#endif
             }
 
             xrpl::AccountID srcIssuerID;
@@ -292,7 +301,8 @@ PathSession::parseJson(json::Value const& jvIn)
                         jvStatus_ = xrpl::rpcError(xrpl::RpcSrcIsrMalformed);
                         return kPjInvalid;
                     }
-                    srcPathAsset.visit(
+                    visitAsset(
+                        srcPathAsset,
                         [&](xrpl::Currency const& currency) {
                             if (srcIssuerID != *src_)
                                 sourceAssets_.insert(xrpl::Issue{currency, srcIssuerID});
@@ -306,7 +316,8 @@ PathSession::parseJson(json::Value const& jvIn)
             }
             else
             {
-                srcPathAsset.visit(
+                visitAsset(
+                    srcPathAsset,
                     [&](xrpl::Currency const& currency) {
                         sourceAssets_.insert(xrpl::Issue{currency, srcIssuerID});
                     },
@@ -349,7 +360,7 @@ PathSession::isValid(std::shared_ptr<xrpl::AssetCache> const& cache)
         return false;
     }
     auto const sleDest = lrLedger->read(xrpl::keylet::account(*dst_));
-    json::Value& jvDestCur = (jvStatus_[xrpl::jss::destination_currencies] = json::ValueType::Array);
+    json::Value& jvDestCur = (jvStatus_[xrpl::jss::destination_currencies] = kJsonArray);
     if (!sleDest)
     {
         jvDestCur.append(json::Value(xrpl::systemCurrencyCode()));
@@ -436,7 +447,8 @@ PathSession::revalidatePaths(
     xrpl::STAmount const saMaxAmount = [&]() {
         if (sendMax_)
             return *sendMax_;
-        return asset.visit(
+        return visitAsset(
+            asset,
             [&](xrpl::Issue const& issue) {
                 return xrpl::STAmount(xrpl::Issue{issue.currency, sourceAccount}, 1u, 0, true);
             },
@@ -453,7 +465,7 @@ PathSession::revalidatePaths(
     try
     {
         xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-        rc = xrpl::path::RippleCalc::rippleCalculate(
+        rc = rippleCalculate(
             sandbox,
             saMaxAmount,
             dstAmount,
@@ -473,20 +485,19 @@ PathSession::revalidatePaths(
     if (rc.result() != xrpl::tesSUCCESS)
         return false;
 
-    json::Value jvEntry(json::ValueType::Object);
-    if (rc.actualAmountIn.holds<xrpl::Issue>())
-        rc.actualAmountIn.get<xrpl::Issue>().account = sourceAccount;
+    json::Value jvEntry(kJsonObject);
+    forceIssueAccount(rc.actualAmountIn, sourceAccount);
     jvEntry[xrpl::jss::source_amount] =
-        rc.actualAmountIn.getJson(xrpl::JsonOptions::Values::None);
+        rc.actualAmountIn.getJson(kJsonNone);
     jvEntry[xrpl::jss::paths_computed] =
-        cappedPaths(paths).getJson(xrpl::JsonOptions::Values::None);
+        cappedPaths(paths).getJson(kJsonNone);
     if (convertAll_)
     {
         jvEntry[xrpl::jss::destination_amount] =
-            rc.actualAmountOut.getJson(xrpl::JsonOptions::Values::None);
+            rc.actualAmountOut.getJson(kJsonNone);
     }
     if (oneShot_)
-        jvEntry[xrpl::jss::paths_canonical] = json::ValueType::Array;
+        jvEntry[xrpl::jss::paths_canonical] = kJsonArray;
     jvArray.append(std::move(jvEntry));
     return true;
 }
@@ -539,8 +550,9 @@ PathSession::findPaths(
         {
             bool overHard = false;
             bool atSoft = false;
-            std::visit(
-                [&]<typename TAsset>(TAsset const& a) {
+            visitAsset(
+                asset,
+                [&](xrpl::Currency const& a) {
                     if (!sameAccount || a != dstAmount_.asset())
                     {
                         if (sourceAssets.size() >= hardMax)
@@ -553,18 +565,26 @@ PathSession::findPaths(
                             atSoft = true;
                             return;
                         }
-                        if constexpr (std::is_same_v<TAsset, xrpl::Currency>)
-                        {
-                            sourceAssets.insert(
-                                xrpl::Issue{a, a.isZero() ? xrpl::xrpAccount() : *src_});
-                        }
-                        else
-                        {
-                            sourceAssets.insert(xrpl::MPTIssue{a});
-                        }
+                        sourceAssets.insert(
+                            xrpl::Issue{a, a.isZero() ? xrpl::xrpAccount() : *src_});
                     }
                 },
-                asset.value());
+                [&](xrpl::MPTID const& a) {
+                    if (!sameAccount || a != dstAmount_.asset())
+                    {
+                        if (sourceAssets.size() >= hardMax)
+                        {
+                            overHard = true;
+                            return;
+                        }
+                        if (sourceAssets.size() >= softMax)
+                        {
+                            atSoft = true;
+                            return;
+                        }
+                        sourceAssets.insert(xrpl::MPTIssue{a});
+                    }
+                });
             if (overHard)
                 return false;
             if (atSoft)
@@ -683,7 +703,8 @@ PathSession::findPaths(
         xrpl::STAmount const saMaxAmount = [&]() {
             if (sendMax_)
                 return *sendMax_;
-            return asset.visit(
+            return visitAsset(
+                asset,
                 [&](xrpl::Issue const& issue) {
                     return xrpl::STAmount(xrpl::Issue{issue.currency, sourceAccount}, 1u, 0, true);
                 },
@@ -697,26 +718,25 @@ PathSession::findPaths(
         try
         {
             xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-            auto rc = xrpl::path::RippleCalc::rippleCalculate(
+            auto rc = rippleCalculate(
                 sandbox, saMaxAmount, dstAmount, *dst_, *src_, ps, domain_, registry_, &rcInput);
             auto const calcMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tCalc);
 
             if (rc.result() == xrpl::tesSUCCESS)
             {
-                json::Value jvEntry(json::ValueType::Object);
-                if (rc.actualAmountIn.holds<xrpl::Issue>())
-                    rc.actualAmountIn.get<xrpl::Issue>().account = sourceAccount;
+                json::Value jvEntry(kJsonObject);
+                forceIssueAccount(rc.actualAmountIn, sourceAccount);
                 jvEntry[xrpl::jss::source_amount] =
-                    rc.actualAmountIn.getJson(xrpl::JsonOptions::Values::None);
-                jvEntry[xrpl::jss::paths_computed] = ps.getJson(xrpl::JsonOptions::Values::None);
+                    rc.actualAmountIn.getJson(kJsonNone);
+                jvEntry[xrpl::jss::paths_computed] = ps.getJson(kJsonNone);
                 if (convertAll_)
                 {
                     jvEntry[xrpl::jss::destination_amount] =
-                        rc.actualAmountOut.getJson(xrpl::JsonOptions::Values::None);
+                        rc.actualAmountOut.getJson(kJsonNone);
                 }
                 if (oneShot_)
-                    jvEntry[xrpl::jss::paths_canonical] = json::ValueType::Array;
+                    jvEntry[xrpl::jss::paths_canonical] = kJsonArray;
                 // UI clients (swap PathFind) only read alternatives[0]. Keep
                 // computed hop lists ahead of default-path-only entries.
                 if (ps.empty())
@@ -770,14 +790,14 @@ PathSession::doUpdate(
             return jvStatus_;
     }
 
-    json::Value newStatus = json::ValueType::Object;
+    json::Value newStatus = kJsonObject;
     if (oneShot_)
     {
         (void)cache->getRippleLines(*dst_);
         while (cache->expandIncompleteLinesForSession(id_))
         {
         }
-        auto& destAssets = (newStatus[xrpl::jss::destination_currencies] = json::ValueType::Array);
+        auto& destAssets = (newStatus[xrpl::jss::destination_currencies] = kJsonArray);
         auto const assets = xrpl::accountDestAssets(*dst_, cache, true);
         for (auto const& asset : assets)
             destAssets.append(to_string(asset));
@@ -786,7 +806,7 @@ PathSession::doUpdate(
     newStatus[xrpl::jss::source_account] = xrpl::toBase58(*src_);
     newStatus[xrpl::jss::destination_account] = xrpl::toBase58(*dst_);
     newStatus[xrpl::jss::destination_amount] =
-        dstAmount_.getJson(xrpl::JsonOptions::Values::None);
+        dstAmount_.getJson(kJsonNone);
     newStatus[xrpl::jss::full_reply] = false;
     if (jvId_)
         newStatus[xrpl::jss::id] = jvId_;
@@ -809,7 +829,7 @@ PathSession::doUpdate(
     bool const fullSearch = !revalidateOnly;
     bool const allowEscalate = !revalidateOnly;
 
-    json::Value jvArray = json::ValueType::Array;
+    json::Value jvArray = kJsonArray;
     bool didFullSearch = false;
     if (findPaths(
             cache,

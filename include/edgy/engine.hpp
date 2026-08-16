@@ -82,6 +82,7 @@ struct StreamMetaStats
     std::uint32_t incomplete{0};
     std::uint32_t none{0};
     std::uint32_t parseFail{0};
+    std::uint32_t skippedUnknown{0};
 
     [[nodiscard]] std::uint32_t
     applied() const
@@ -251,6 +252,7 @@ private:
     std::uint64_t applyTxs_{0};
     std::uint64_t applyNoMeta_{0};
     std::uint64_t applyParseFail_{0};
+    std::uint64_t applySkipped_{0};
     std::uint32_t prevCloseTxs_{0};
     std::uint64_t applyCreated_{0};
     std::uint64_t applyDeleted_{0};

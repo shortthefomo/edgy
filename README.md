@@ -2,6 +2,13 @@
 
 A local `path_find` / `ripple_path_find` sidecar for the **[XRP Ledger](https://github.com/XRPLF/rippled)** (`xrpld`) and **[Xahau](https://github.com/Xahau/xahaud)** (`xahaud`). It full-syncs the validated ledger from the node, keeps that state in memory, and answers path-finding from the local snapshot so searches do not wait on another node.
 
+One CMake build produces **two binaries**. Each links its own `libxrpl`; they cannot share a process.
+
+| Binary | Library | Node | Example config |
+| --- | --- | --- | --- |
+| `edgy-xrpld` | rippled `libxrpl` | `xrpld` | [`cfg/edgy-xrpl.example.cfg`](cfg/edgy-xrpl.example.cfg) |
+| `edgy-xahaud` | xahaud `libxrpl` | `xahaud` | [`cfg/edgy-xahau.example.cfg`](cfg/edgy-xahau.example.cfg) |
+
 Wire JSON matches the node: `alternatives`, `source_amount`, `paths_computed`, `paths_canonical`, `full_reply`, ledger identity, and the path warning tokens. On Xahau the native asset is **XAH** (drop strings still work).
 
 A Payment can carry at most **6 paths**, each at most **8 hops**. Edgy never returns more than that.
@@ -33,54 +40,68 @@ Open subscriptions are **repriced every 100ms**. Ledger close also reprices. At 
 
 Binaries and notes: [github.com/shortthefomo/edgy/releases](https://github.com/shortthefomo/edgy/releases). Latest: [releases/latest](https://github.com/shortthefomo/edgy/releases/latest).
 
-Assets are named `edgy-<version>-<os>-<arch>` (for example `edgy-0.1.3-darwin-arm64` on macOS Apple Silicon). Other platforms should [build from source](BUILD.md) until a matching asset is attached.
+Current releases ship `edgy-xrpld` and `edgy-xahaud`. Tags through **v0.1.4** shipped a single `edgy-<version>-<os>-<arch>` binary with a `[network]` switch — do not mix those with these example configs.
+
+Other platforms should [build from source](BUILD.md) until matching assets are attached.
 
 ```bash
-# pick the asset name from the latest release page
-VER=0.1.3
-curl -L -o edgy \
-  "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-${VER}-darwin-arm64"
-chmod +x edgy
-./edgy --version
-# edgy 0.1.3+<git>
+# after a two-binary release is published, pick both asset names from the page
+VER=0.1.5
+curl -L -o edgy-xrpld \
+  "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-xrpld-${VER}-darwin-arm64"
+curl -L -o edgy-xahaud \
+  "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-xahaud-${VER}-darwin-arm64"
+chmod +x edgy-xrpld edgy-xahaud
+./edgy-xrpld --version
+# edgy 0.1.5+xrpld.<git>
+./edgy-xahaud --version
+# edgy 0.1.5+xahaud.<git>
 ```
 
-Grab a starter config from the same tag (or copy `cfg/edgy.example.cfg` from a clone):
+Starter configs from the same tag (or copy from a clone):
 
 ```bash
-curl -L -o edgy.cfg \
-  https://raw.githubusercontent.com/shortthefomo/edgy/v0.1.3/cfg/edgy.example.cfg
+curl -L -o edgy-xrpl.cfg \
+  https://raw.githubusercontent.com/shortthefomo/edgy/develop/cfg/edgy-xrpl.example.cfg
+curl -L -o edgy-xahau.cfg \
+  https://raw.githubusercontent.com/shortthefomo/edgy/develop/cfg/edgy-xahau.example.cfg
 ```
 
-Edit `[node]` to your node’s WebSocket. Then:
-
-```bash
-./edgy --conf edgy.cfg
-```
-
-Xahau (`[network] xahau` / `--xahau`) is on this tree. Use a binary built from `xahaud-support` or later, or [build from source](BUILD.md), until a release newer than `0.1.3` is published.
-
-A full XRPL mainnet snapshot is ~19 million objects and needs tens of gigabytes of RAM. Xahau is smaller. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
+Edit `[node]` in each file to the matching node WebSocket. A full XRPL mainnet snapshot is ~19 million objects and needs tens of gigabytes of RAM. Xahau is smaller. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
 
 ## Build
 
-See [`BUILD.md`](BUILD.md). After a local Release build the binary is `.build/edgy`.
+See [`BUILD.md`](BUILD.md). After a local Release build the binaries are `.build/edgy-xrpld` and `.build/edgy-xahaud`.
 
 ## Run
 
-Configuration is an xrpld-style `.cfg` (stanzas). Copy the example and edit:
+Configuration is an xrpld-style `.cfg` (stanzas). There is one example per binary.
 
 ```bash
-cp cfg/edgy.example.cfg edgy.cfg
-# or, with a downloaded binary: ./edgy --conf edgy.cfg
-.build/edgy --conf edgy.cfg
+cp cfg/edgy-xrpl.example.cfg edgy-xrpl.cfg
+cp cfg/edgy-xahau.example.cfg edgy-xahau.cfg
+# edit [node] in each file
+.build/edgy-xrpld --conf edgy-xrpl.cfg
+.build/edgy-xahaud --conf edgy-xahau.cfg
 ```
 
-If `edgy.cfg` or `cfg/edgy.cfg` exists in the working directory, it is loaded automatically. (`pathfinder.cfg` is still accepted.) Command-line flags override the file.
+With no `--conf`, `edgy-xrpld` loads `edgy-xrpl.cfg` (then `edgy.cfg` / `pathfinder.cfg`). `edgy-xahaud` loads `edgy-xahau.cfg` first. Command-line flags override the file.
+
+The examples use different listen ports so both can run on one host:
+
+| | `edgy-xrpld` | `edgy-xahaud` |
+| --- | --- | --- |
+| Example | [`cfg/edgy-xrpl.example.cfg`](cfg/edgy-xrpl.example.cfg) | [`cfg/edgy-xahau.example.cfg`](cfg/edgy-xahau.example.cfg) |
+| Copy to | `edgy-xrpl.cfg` | `edgy-xahau.cfg` |
+| `[debug]` | `/tmp/edgy-xrpl.log` | `/tmp/edgy-xahau.log` |
+| `[listen-ws]` | `0.0.0.0:6008` | `0.0.0.0:6018` |
+| `[listen-rpc]` | `0.0.0.0:5008` | `0.0.0.0:5018` |
+| `[node]` | `ws://127.0.0.1:6006` | `ws://127.0.0.1:6006` |
+| Native | XRP | XAH |
 
 ```
 [debug]
-/tmp/edgy.log
+/tmp/edgy-xrpl.log
 
 [listen-ws]
 0.0.0.0:6008
@@ -90,9 +111,6 @@ If `edgy.cfg` or `cfg/edgy.cfg` exists in the working directory, it is loaded au
 
 [node]
 ws://127.0.0.1:6006
-
-[network]
-xrpl
 
 [workers]
 64
@@ -131,37 +149,18 @@ full
 6
 ```
 
-```bash
-# XRPL (default)
-.build/edgy --conf edgy.cfg --workers 64
-
-# Xahau — same binary, switch the ledger family
-.build/edgy --conf edgy.cfg --xahau --node ws://127.0.0.1:6006
-```
-
-### Xahau
-
-Edgy still links `libxrpl` from rippled. Point `[node]` at an [xahaud](https://github.com/Xahau/xahaud) WebSocket and set the family:
-
-```
-[node]
-ws://127.0.0.1:6006
-
-[network]
-xahau
-```
-
-`--xahau` / `--network xahau` and `EDGY_NETWORK=xahau` do the same. Public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks. Unknown xahaud ledger types (Hooks, URITokens) are stored as blobs and skipped for path finding.
+`edgy-xahaud` is the same stanzas with the Xahau listen ports and `/tmp/edgy-xahau.log`. There is no `[network]` flag — pick the binary.
 
 Startup connects to `[node]` and requires `server_info.info.server_state` to be `full`, `proposing`, or `unknown`. Anything else (`syncing`, `connected`, …) exits immediately with a fatal error — it will not listen or snapshot.
 
-Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before expecting path results. `server_info` is forwarded to the upstream node. After each close, stderr should show `txs=N/N … inline with node`.
+Point XRPL clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Point Xahau clients at `ws://127.0.0.1:6018` or `http://127.0.0.1:5018` if you kept the example ports. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before expecting path results. `server_info` is forwarded to the upstream node. After each close, stderr should show `txs=N/N … inline with node`.
+
+On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks. `edgy-xahaud` uses xahaud `libxrpl`, so Hook / URIToken / HookState parse as normal ledger objects. The book graph still only walks offers, AMMs, and directories.
 
 | Flag / stanza | Meaning |
 | --- | --- |
 | `--conf` / file path | Config file |
-| `[node]` / `--node` | Upstream `xrpld` or `xahaud` WebSocket |
-| `[network]` / `--network` | `xrpl` (default) or `xahau`. `--xahau` is the same as `--network xahau` |
+| `[node]` / `--node` | Upstream node WebSocket |
 | `[listen-ws]` / `--listen-ws` | Local WebSocket (`path_find` + proxy) |
 | `[listen-rpc]` / `--listen-rpc` | Local HTTP JSON-RPC |
 | `[workers]` / `--workers` | Concurrent search threads (1–256, default 128) |
@@ -178,7 +177,7 @@ Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `sna
 | `[line_chunk_size]` | Line-fetch chunk |
 | `[cache_reuse_ledgers]` | Reuse line cache across this many ledgers |
 
-`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted. `EDGY_NETWORK` overrides `[network]` unless `--network` / `--xahau` is also passed.
+`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted.
 
 Default is a full ledger sync and a full book-graph search. Set `[search-fast]` below `[search]` to start WebSocket replies shallow and deepen while the socket stays open.
 
@@ -272,12 +271,15 @@ Poll this on a timer to graph load. Fields sit at the top of `result`, matching 
 ## Layout
 
 ```
+cfg/edgy-xrpl.example.cfg
+cfg/edgy-xahau.example.cfg
 include/edgy/           sidecar (ledger, graph, engine, WS/HTTP)
+include/edgy/xahau_compat/   headers that adapt xahaud libxrpl
 include/xrpld/rpc/      AssetCache / Pathfinder headers (include-path shim)
 src/edgy/               sidecar implementation
-src/vendor/path/        AssetCache, TrustLine, AccountAssets (and unused Pathfinder copy)
+src/vendor/path/        AssetCache, TrustLine, AccountAssets (Pathfinder on xrpld only)
 src/app/main.cpp
-tests/edgy_tests.cpp
+tests/edgy_tests.cpp    linked to edgy-xrpld
 ```
 
-Live search is `FastPathFinder` in `graph.cpp` + `LocalOrderBooks`. RippleCalc still comes from `libxrpl`.
+Live search is `FastPathFinder` in `graph.cpp` + `LocalOrderBooks`. RippleCalc comes from rippled `libxrpl` in `edgy-xrpld`, and from xahaud’s payment-engine sources plus xahaud `libxrpl` in `edgy-xahaud`.
