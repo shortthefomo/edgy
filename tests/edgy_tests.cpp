@@ -9,6 +9,7 @@
 #include <edgy/services.hpp>
 #include <edgy/session.hpp>
 
+#include <xrpld/rpc/detail/AccountAssets.h>
 #include <xrpld/rpc/detail/AssetCache.h>
 #include <xrpld/rpc/detail/Pathfinder.h>
 #include <xrpld/rpc/detail/Tuning.h>
@@ -25,6 +26,7 @@
 #include <xrpl/protocol/STParsedJSON.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STLedgerEntry.h>
+#include <xrpl/protocol/STVector256.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/jss.h>
 
@@ -563,6 +565,53 @@ main()
         auto openAgain = b.publish();
         cache->advanceLedger(openAgain);
         expect(cache->getLedger()->open(), "same-seq closed->open still swaps the view");
+    }
+
+    {
+        // Regression: forEachItem passes nullptr when owner-dir Indexes
+        // names a missing/unreadable child. getMPTs used to sle->getType()
+        // and SIGSEGV on the first path_find after a live close.
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 99;
+        b.setHeader(h);
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto acct = std::make_shared<xrpl::SLE>(xrpl::keylet::account(src));
+        acct->setAccountID(xrpl::sfAccount, src);
+        acct->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{10'000'000'000}});
+        acct->setFieldU32(xrpl::sfSequence, 1);
+        acct->setFieldU32(xrpl::sfOwnerCount, 1);
+        acct->setFieldU32(xrpl::sfFlags, 0);
+        b.upsert(acct);
+
+        xrpl::uint256 missing;
+        (void)missing.parseHex(
+            "DEAD000000000000000000000000000000000000000000000000000000000001");
+        auto const dirKey = xrpl::keylet::ownerDir(src);
+        auto dir = std::make_shared<xrpl::SLE>(dirKey);
+        xrpl::STVector256 indexes(xrpl::sfIndexes);
+        indexes.pushBack(missing);
+        dir->setFieldV256(xrpl::sfIndexes, indexes);
+        dir->setFieldH256(xrpl::sfRootIndex, dirKey.key);
+        dir->setFieldU64(xrpl::sfIndexNext, 0);
+        b.upsert(dir);
+
+        auto view = b.publish();
+        auto cache = std::make_shared<xrpl::AssetCache>(view, services.getJournal("test"));
+        bool crashed = false;
+        try
+        {
+            auto const dest = xrpl::accountDestAssets(src, cache, true);
+            expect(!dest.empty(), "dest assets still include native after a hole in owner dir");
+            (void)cache->getMPTs(src);
+        }
+        catch (...)
+        {
+            crashed = true;
+        }
+        expect(!crashed, "owner-dir hole does not crash getMPTs / accountDestAssets");
     }
 
     {

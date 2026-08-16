@@ -161,6 +161,8 @@ getTrustLineItems(
 {
     std::vector<T> items;
     forEachItem(view, accountID, [&items, &accountID, &direction](SLE::const_ref sleCur) {
+        if (!sleCur)
+            return;
         auto ret = T::makeItem(accountID, sleCur);
         if (ret && (direction == LineDirection::Outgoing || !ret->getNoRipple()))
             items.push_back(std::move(*ret));
