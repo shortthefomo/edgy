@@ -445,11 +445,33 @@ sleFromBinary(std::string const& dataHex, std::string const& indexHex)
     return sleFromBlob(*blob, key);
 }
 
+bool
+isJsonAssetLeaf(json::Value const& v)
+{
+    if (!v.isObject())
+        return false;
+    auto const names = v.getMemberNames();
+    if (names.empty())
+        return false;
+    for (auto const& name : names)
+    {
+        if (name != "currency" && name != "issuer" && name != "value" &&
+            name != "mpt_issuance_id")
+            return false;
+    }
+    return true;
+}
+
 void
 stripUnknownJsonFields(json::Value& v)
 {
     if (v.isObject())
     {
+        // Amount / Issue JSON uses lowercase currency/issuer/value. Those
+        // are not SFields ("Issuer" is). Recursing would delete them and
+        // STParsedJSON would drop every Offer / RippleState node.
+        if (isJsonAssetLeaf(v))
+            return;
         auto const names = v.getMemberNames();
         for (auto const& name : names)
         {

@@ -935,6 +935,7 @@ Engine::resetApplyStats()
 {
     applyTxs_ = 0;
     applyNoMeta_ = 0;
+    applyParseFail_ = 0;
     // prevCloseTxs_ is the last ledgerClosed txn_count; not cleared here.
     applyCreated_ = 0;
     applyDeleted_ = 0;
@@ -960,7 +961,7 @@ Engine::logSync(char const* what, xrpl::LedgerHeader const& header, json::Value 
     // Txs for ledger N arrive after ledgerClosed N. This line reports
     // applies since the previous close against that close's txn_count.
     auto const nodeTxs = prevCloseTxs_;
-    bool const txOk = nodeTxs == 0 || (applyTxs_ + applyNoMeta_) == nodeTxs;
+    bool const txOk = applyTxsMatchNode(applyTxs_, applyNoMeta_, nodeTxs);
     bool const seqOk = nodeSeq == 0 || nodeSeq == header.seq;
 
     std::cerr << "sync " << what << " ledger " << header.seq << " " << shortHash(header.hash)
@@ -970,6 +971,8 @@ Engine::logSync(char const* what, xrpl::LedgerHeader const& header, json::Value 
         std::cerr << "/" << nodeTxs;
     if (applyNoMeta_ != 0)
         std::cerr << " no_meta=" << applyNoMeta_;
+    if (applyParseFail_ != 0)
+        std::cerr << " parse_fail=" << applyParseFail_;
     std::cerr << " created=" << applyCreated_ << " deleted=" << applyDeleted_
               << " modified=" << applyModified_;
     if (applyIncomplete_ != 0)
@@ -1117,7 +1120,7 @@ Engine::applyTransaction(json::Value const& msg)
             applyModified_ += stats.modified;
             applyDeleted_ += stats.deleted;
             applyIncomplete_ += stats.incomplete;
-            applyNoMeta_ += stats.parseFail;
+            applyParseFail_ += stats.parseFail;
             any = stats.applied() != 0;
         }
         else

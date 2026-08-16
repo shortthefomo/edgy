@@ -119,6 +119,10 @@ main()
         expect(shouldApplyStreamTx(101, 100), "tx for the next ledger applies");
         expect(!shouldApplyStreamTx(99, 100), "tx for an older ledger is skipped");
         expect(shouldApplyStreamTx(0, 100), "tx with no ledger_index still applies");
+        expect(applyTxsMatchNode(40, 0, 40), "all txs applied matches node");
+        expect(applyTxsMatchNode(38, 2, 40), "applied + missing-meta matches node");
+        expect(!applyTxsMatchNode(40, 391, 40), "parseFail must not be added into the tx check");
+        expect(applyTxsMatchNode(0, 0, 0), "unknown node txn_count is ok");
     }
 
     {
@@ -170,6 +174,48 @@ main()
         expect(stats.parseFail == 0, "unknown xahaud JSON fields are stripped");
         expect(stats.created == 1, "AccountRoot still applies with extra JSON fields");
         expect(b.contains(key), "xahaud extra fields do not drop the SLE");
+    }
+
+    {
+        // Issued amounts are {currency,issuer,value}. Those keys are not
+        // SFields; stripping them used to parseFail every Offer / line.
+        LedgerBuilder b;
+        LocalOrderBooks books;
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const gw = src;
+        xrpl::uint256 key;
+        (void)key.parseHex(
+            "00700000000000000000000000000000000000000000000000000000000000AA");
+        json::Value meta{json::ValueType::Object};
+        json::Value& nodes = (meta["AffectedNodes"] = json::ValueType::Array);
+        json::Value& wrap = nodes.append(json::ValueType::Object);
+        json::Value& created = (wrap["CreatedNode"] = json::ValueType::Object);
+        created["LedgerEntryType"] = "Offer";
+        created["LedgerIndex"] = to_string(key);
+        json::Value& fields = (created["NewFields"] = json::ValueType::Object);
+        fields["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        fields["Sequence"] = 2;
+        json::Value pays{json::ValueType::Object};
+        pays["currency"] = "USD";
+        pays["issuer"] = to_string(gw);
+        pays["value"] = "1";
+        fields["TakerPays"] = pays;
+        fields["TakerGets"] = "1000000";
+        fields["BookDirectory"] =
+            "02000000000000000000000000000000000000000000000000000000000000BB";
+        fields["BookNode"] = "0";
+        fields["OwnerNode"] = "0";
+        json::Value stripped = created;
+        stripUnknownJsonFields(stripped);
+        expect(stripped["NewFields"]["TakerPays"].isObject() &&
+                   stripped["NewFields"]["TakerPays"].isMember("currency") &&
+                   stripped["NewFields"]["TakerPays"]["currency"].asString() == "USD",
+               "amount JSON currency/issuer/value survive strip");
+        auto const stats = applyJsonAffectedNodes(b, books, meta);
+        expect(stats.parseFail == 0, "Offer with issued TakerPays parses");
+        expect(stats.created == 1 || stats.incomplete == 1,
+               "issued-amount Offer is applied");
+        expect(b.contains(key), "issued-amount Offer is stored");
     }
 
     {

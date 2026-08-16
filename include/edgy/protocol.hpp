@@ -22,6 +22,7 @@ sleFromBinary(std::string const& dataHex, std::string const& indexHex);
 
 // Drop JSON keys that are not SFields so STParsedJSON can apply
 // AccountRoot / Offer / RippleState updates from a xahaud stream.
+// Does not walk into amount/issue objects (currency/issuer/value).
 void
 stripUnknownJsonFields(json::Value& v);
 
