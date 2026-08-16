@@ -18,6 +18,16 @@
 
 namespace edgy {
 
+// Rules::Impl stores a reference to this set. It must outlive every Rules
+// object. A temporary (Rules{{}}) dangles and SIGSEGVs in enabled() once
+// the heap is reused — typically inside RippleCalc / checkFreeze.
+[[nodiscard]] inline std::unordered_set<xrpl::uint256, beast::Uhash<>> const&
+emptyRulePresets()
+{
+    static std::unordered_set<xrpl::uint256, beast::Uhash<>> const kEmpty;
+    return kEmpty;
+}
+
 /**
  * Immutable in-memory ledger tuned for path_find.
  *
@@ -214,7 +224,7 @@ private:
 
     xrpl::LedgerHeader header_{};
     xrpl::Fees fees_{};
-    xrpl::Rules rules_{std::unordered_set<xrpl::uint256, beast::Uhash<>>{}};
+    xrpl::Rules rules_{emptyRulePresets()};
     std::shared_ptr<MemoryLedger::Base> base_;
     std::shared_ptr<MemoryLedger::Overlay> overlay_;
     bool frozen_{false};

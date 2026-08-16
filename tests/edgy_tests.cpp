@@ -5,9 +5,11 @@
 #include <edgy/memory_ledger.hpp>
 #include <edgy/node_client.hpp>
 #include <edgy/order_books.hpp>
+#include <edgy/protocol.hpp>
 #include <edgy/services.hpp>
 #include <edgy/session.hpp>
 
+#include <xrpld/rpc/detail/AccountAssets.h>
 #include <xrpld/rpc/detail/AssetCache.h>
 #include <xrpld/rpc/detail/Pathfinder.h>
 #include <xrpld/rpc/detail/Tuning.h>
@@ -24,6 +26,7 @@
 #include <xrpl/protocol/STParsedJSON.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STLedgerEntry.h>
+#include <xrpl/protocol/STVector256.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/jss.h>
 
@@ -82,6 +85,10 @@ main()
         expect(d.searchTimeout.count() == 0, "default [timeout-ms] is none");
         expect(d.fullSnapshot, "default [full-snapshot] is full");
         expect(d.midCloseDelay.count() == 100, "default [update-ms] is 100");
+        expect(d.network == NetworkKind::xrpl, "default [network] is xrpl");
+        expect(!d.xahau(), "default is not xahau");
+        expect(std::string{d.nativeCurrency()} == "XRP", "default native is XRP");
+        expect(std::string{d.nodeSoftware()} == "xrpld", "default node software is xrpld");
     }
 
     {
@@ -112,6 +119,10 @@ main()
         expect(shouldApplyStreamTx(101, 100), "tx for the next ledger applies");
         expect(!shouldApplyStreamTx(99, 100), "tx for an older ledger is skipped");
         expect(shouldApplyStreamTx(0, 100), "tx with no ledger_index still applies");
+        expect(applyTxsMatchNode(40, 0, 40), "all txs applied matches node");
+        expect(applyTxsMatchNode(38, 2, 40), "applied + missing-meta matches node");
+        expect(!applyTxsMatchNode(40, 391, 40), "parseFail must not be added into the tx check");
+        expect(applyTxsMatchNode(0, 0, 0), "unknown node txn_count is ok");
     }
 
     {
@@ -139,6 +150,72 @@ main()
         auto view = b.publish();
         expect(view->exists(xrpl::keylet::account(src)), "created account is readable");
         expect(view->overlaySize() == 1 || view->size() == 1, "overlay/base holds the new object");
+    }
+
+    {
+        // xahaud AccountRoot JSON includes reward/hook fields libxrpl does not know.
+        LedgerBuilder b;
+        LocalOrderBooks books;
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const key = xrpl::keylet::account(src).key;
+        json::Value meta{json::ValueType::Object};
+        json::Value& nodes = (meta["AffectedNodes"] = json::ValueType::Array);
+        json::Value& wrap = nodes.append(json::ValueType::Object);
+        json::Value& created = (wrap["CreatedNode"] = json::ValueType::Object);
+        created["LedgerEntryType"] = "AccountRoot";
+        created["LedgerIndex"] = to_string(key);
+        json::Value& fields = (created["NewFields"] = json::ValueType::Object);
+        fields["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        fields["Balance"] = "10000000000";
+        fields["Sequence"] = 1;
+        fields["RewardAccumulator"] = "1";
+        fields["HookStateCount"] = 0;
+        auto const stats = applyJsonAffectedNodes(b, books, meta);
+        expect(stats.parseFail == 0, "unknown xahaud JSON fields are stripped");
+        expect(stats.created == 1, "AccountRoot still applies with extra JSON fields");
+        expect(b.contains(key), "xahaud extra fields do not drop the SLE");
+    }
+
+    {
+        // Issued amounts are {currency,issuer,value}. Those keys are not
+        // SFields; stripping them used to parseFail every Offer / line.
+        LedgerBuilder b;
+        LocalOrderBooks books;
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const gw = src;
+        xrpl::uint256 key;
+        (void)key.parseHex(
+            "00700000000000000000000000000000000000000000000000000000000000AA");
+        json::Value meta{json::ValueType::Object};
+        json::Value& nodes = (meta["AffectedNodes"] = json::ValueType::Array);
+        json::Value& wrap = nodes.append(json::ValueType::Object);
+        json::Value& created = (wrap["CreatedNode"] = json::ValueType::Object);
+        created["LedgerEntryType"] = "Offer";
+        created["LedgerIndex"] = to_string(key);
+        json::Value& fields = (created["NewFields"] = json::ValueType::Object);
+        fields["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        fields["Sequence"] = 2;
+        json::Value pays{json::ValueType::Object};
+        pays["currency"] = "USD";
+        pays["issuer"] = to_string(gw);
+        pays["value"] = "1";
+        fields["TakerPays"] = pays;
+        fields["TakerGets"] = "1000000";
+        fields["BookDirectory"] =
+            "02000000000000000000000000000000000000000000000000000000000000BB";
+        fields["BookNode"] = "0";
+        fields["OwnerNode"] = "0";
+        json::Value stripped = created;
+        stripUnknownJsonFields(stripped);
+        expect(stripped["NewFields"]["TakerPays"].isObject() &&
+                   stripped["NewFields"]["TakerPays"].isMember("currency") &&
+                   stripped["NewFields"]["TakerPays"]["currency"].asString() == "USD",
+               "amount JSON currency/issuer/value survive strip");
+        auto const stats = applyJsonAffectedNodes(b, books, meta);
+        expect(stats.parseFail == 0, "Offer with issued TakerPays parses");
+        expect(stats.created == 1 || stats.incomplete == 1,
+               "issued-amount Offer is applied");
+        expect(b.contains(key), "issued-amount Offer is stored");
     }
 
     {
@@ -209,6 +286,48 @@ main()
         expect(cfg.searchFast == Config::kSearchFull, "stanza [search-fast] full");
         expect(cfg.searchTimeout.count() == 0, "stanza [timeout-ms] 0");
         expect(cfg.fullSnapshot, "stanza [full-snapshot] full");
+        expect(cfg.network == NetworkKind::xrpl, "stanza default [network] xrpl");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-xahau.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[network]\nxahau\n[node]\nws://127.0.0.1:6006\n";
+        }
+        auto const cfg = Config::fromFile(path);
+        expect(cfg.network == NetworkKind::xahau, "stanza [network] xahau");
+        expect(cfg.xahau(), "xahau() is true");
+        expect(std::string{cfg.nativeCurrency()} == "XAH", "xahau native is XAH");
+        expect(std::string{cfg.nodeSoftware()} == "xahaud", "xahau node software is xahaud");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-xahaud-alias.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[node-type]\nxahaud\n";
+        }
+        auto const cfg = Config::fromFile(path);
+        expect(cfg.network == NetworkKind::xahau, "stanza [node-type] xahaud");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-bad-network.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[network]\nsolana\n";
+        }
+        bool threw = false;
+        try
+        {
+            (void)Config::fromFile(path);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "invalid [network] throws");
     }
 
     {
@@ -264,6 +383,39 @@ main()
     }
 
     {
+        char arg0[] = "edgy";
+        char a1[] = "--xahau";
+        char* argv[] = {arg0, a1, nullptr};
+        auto const cfg = Config::fromArgs(2, argv);
+        expect(cfg.network == NetworkKind::xahau, "CLI --xahau");
+    }
+
+    {
+        char arg0[] = "edgy";
+        char a1[] = "--network";
+        char a2[] = "xahau";
+        char* argv[] = {arg0, a1, a2, nullptr};
+        auto const cfg = Config::fromArgs(3, argv);
+        expect(cfg.network == NetworkKind::xahau, "CLI --network xahau");
+    }
+
+    {
+        char arg0[] = "edgy";
+        char arg1[] = "--conf";
+        auto const path = std::string{"/tmp/edgy-test-network-override.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[network]\nxrpl\n";
+        }
+        char arg2[128];
+        std::snprintf(arg2, sizeof(arg2), "%s", path.c_str());
+        char arg3[] = "--xahau";
+        char* argv[] = {arg0, arg1, arg2, arg3, nullptr};
+        auto const cfg = Config::fromArgs(4, argv);
+        expect(cfg.network == NetworkKind::xahau, "CLI --xahau overrides [network]");
+    }
+
+    {
         char const* shipped[] = {
             "cfg/edgy.example.cfg",
             "/Users/fomo/Dev/Ledgers/PathFinder/cfg/edgy.example.cfg",
@@ -283,6 +435,7 @@ main()
             expect(cfg.search == Config::kSearchFull, "shipped [search] full");
             expect(cfg.searchFast == Config::kSearchFull, "shipped [search-fast] full");
             expect(cfg.fullSnapshot, "shipped [full-snapshot] full");
+            expect(cfg.network == NetworkKind::xrpl, "shipped [network] xrpl");
             parsed = true;
             break;
         }
@@ -309,6 +462,78 @@ main()
         expect(view->exists(xrpl::keylet::account(src)), "account exists in memory ledger");
         expect(view->read(xrpl::keylet::account(src)) != nullptr, "account readable");
         expect(view->size() == 1, "single object stored");
+        // Rules::Impl refs presets; a temporary set used to UAF in enabled().
+        (void)view->rules().enabled(xrpl::uint256{});
+        auto const rebuilt = xrpl::makeRulesGivenLedger(*view, view->rules());
+        (void)rebuilt.enabled(xrpl::uint256{});
+        expect(true, "Rules::enabled after publish does not dangle presets");
+
+        xrpl::Serializer extra;
+        sle->add(extra);
+        extra.addFieldID(xrpl::STI_UINT32, 200);
+        extra.add32(std::uint32_t{42});
+        auto parsed = sleFromBlob(extra.getData(), xrpl::keylet::account(src).key);
+        expect(parsed != nullptr, "sleFromBlob drops unknown xahaud fields");
+        expect(parsed->isFieldPresent(xrpl::sfAccount), "stripped SLE still has Account");
+        expect(parsed->getAccountID(xrpl::sfAccount) == src, "stripped SLE Account matches");
+    }
+
+    {
+        json::Value amt{json::ValueType::Object};
+        amt["currency"] = "XAH";
+        amt["value"] = "1";
+        rewriteNativeJsonIn(amt, NetworkKind::xahau);
+        expect(amt.isString() && amt.asString() == "1000000", "1 XAH becomes 1000000 drops");
+        xrpl::STAmount sa;
+        expect(xrpl::amountFromJsonNoThrow(sa, amt), "XAH amount parses after rewrite");
+        expect(sa.native(), "XAH rewrites to native");
+
+        json::Value srcCur{json::ValueType::Object};
+        srcCur["currency"] = "XAH";
+        rewriteNativeJsonIn(srcCur, NetworkKind::xahau);
+        expect(srcCur.isObject() && srcCur["currency"].asString() == "XRP",
+               "source currency XAH becomes native XRP");
+
+        json::Value all{json::ValueType::Object};
+        all["currency"] = "XAH";
+        all["value"] = "-1";
+        rewriteNativeJsonIn(all, NetworkKind::xahau);
+        expect(all.isString() && all.asString() == "-1", "XAH convert-all stays -1");
+
+        json::Value out{json::ValueType::Object};
+        out["currency"] = "XRP";
+        out["value"] = "1";
+        rewriteNativeJsonOut(out, NetworkKind::xahau);
+        expect(out["currency"].asString() == "XAH", "native XRP becomes XAH on the way out");
+
+        json::Value usd{json::ValueType::Object};
+        usd["currency"] = "USD";
+        usd["issuer"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        usd["value"] = "1";
+        rewriteNativeJsonOut(usd, NetworkKind::xahau);
+        expect(usd["currency"].asString() == "USD", "issued USD is not rewritten");
+
+        json::Value issued{json::ValueType::Object};
+        issued["currency"] = "XRP";
+        issued["issuer"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        rewriteNativeJsonOut(issued, NetworkKind::xahau);
+        expect(issued["currency"].asString() == "XRP", "issued XRP is not rewritten");
+
+        json::Value dest{json::ValueType::Object};
+        dest["destination_currencies"] = json::ValueType::Array;
+        dest["destination_currencies"].append("XRP");
+        dest["destination_currencies"].append("USD");
+        rewriteNativeJsonOut(dest, NetworkKind::xahau);
+        expect(dest["destination_currencies"][0u].asString() == "XAH",
+               "destination_currencies XRP becomes XAH");
+        expect(dest["destination_currencies"][1u].asString() == "USD",
+               "destination_currencies USD stays");
+
+        json::Value leave{json::ValueType::Object};
+        leave["currency"] = "XAH";
+        leave["value"] = "1";
+        rewriteNativeJsonIn(leave, NetworkKind::xrpl);
+        expect(leave["currency"].asString() == "XAH", "xrpl mode leaves XAH as issued");
     }
 
     {
@@ -391,6 +616,53 @@ main()
         auto openAgain = b.publish();
         cache->advanceLedger(openAgain);
         expect(cache->getLedger()->open(), "same-seq closed->open still swaps the view");
+    }
+
+    {
+        // Regression: forEachItem passes nullptr when owner-dir Indexes
+        // names a missing/unreadable child. getMPTs used to sle->getType()
+        // and SIGSEGV on the first path_find after a live close.
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 99;
+        b.setHeader(h);
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto acct = std::make_shared<xrpl::SLE>(xrpl::keylet::account(src));
+        acct->setAccountID(xrpl::sfAccount, src);
+        acct->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{10'000'000'000}});
+        acct->setFieldU32(xrpl::sfSequence, 1);
+        acct->setFieldU32(xrpl::sfOwnerCount, 1);
+        acct->setFieldU32(xrpl::sfFlags, 0);
+        b.upsert(acct);
+
+        xrpl::uint256 missing;
+        (void)missing.parseHex(
+            "DEAD000000000000000000000000000000000000000000000000000000000001");
+        auto const dirKey = xrpl::keylet::ownerDir(src);
+        auto dir = std::make_shared<xrpl::SLE>(dirKey);
+        xrpl::STVector256 indexes(xrpl::sfIndexes);
+        indexes.pushBack(missing);
+        dir->setFieldV256(xrpl::sfIndexes, indexes);
+        dir->setFieldH256(xrpl::sfRootIndex, dirKey.key);
+        dir->setFieldU64(xrpl::sfIndexNext, 0);
+        b.upsert(dir);
+
+        auto view = b.publish();
+        auto cache = std::make_shared<xrpl::AssetCache>(view, services.getJournal("test"));
+        bool crashed = false;
+        try
+        {
+            auto const dest = xrpl::accountDestAssets(src, cache, true);
+            expect(!dest.empty(), "dest assets still include native after a hole in owner dir");
+            (void)cache->getMPTs(src);
+        }
+        catch (...)
+        {
+            crashed = true;
+        }
+        expect(!crashed, "owner-dir hole does not crash getMPTs / accountDestAssets");
     }
 
     {

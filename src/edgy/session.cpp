@@ -2,6 +2,7 @@
 
 #include <edgy/config.hpp>
 #include <edgy/graph.hpp>
+#include <edgy/protocol.hpp>
 #include <edgy/services.hpp>
 
 #include <xrpld/rpc/detail/AccountAssets.h>
@@ -151,8 +152,11 @@ PathSession::shouldDeepen() const
 }
 
 int
-PathSession::parseJson(json::Value const& jvParams)
+PathSession::parseJson(json::Value const& jvIn)
 {
+    json::Value jvParams = jvIn;
+    rewriteNativeJsonIn(jvParams, cfg_.network);
+
     if (!jvParams.isMember(xrpl::jss::source_account))
     {
         jvStatus_ = xrpl::rpcError(xrpl::RpcSrcActMissing);
@@ -372,6 +376,13 @@ PathSession::isValid(std::shared_ptr<xrpl::AssetCache> const& cache)
     return true;
 }
 
+json::Value
+emitNative(json::Value j, NetworkKind network)
+{
+    rewriteNativeJsonOut(j, network);
+    return j;
+}
+
 std::pair<bool, json::Value>
 PathSession::doCreate(std::shared_ptr<xrpl::AssetCache> const& cache, json::Value const& params)
 {
@@ -380,9 +391,9 @@ PathSession::doCreate(std::shared_ptr<xrpl::AssetCache> const& cache, json::Valu
     {
         valid = isValid(cache);
         if (!oneShot_ && valid)
-            jvStatus_ = doUpdate(cache, false);
+            return {valid, doUpdate(cache, false)};
     }
-    return {valid, jvStatus_};
+    return {valid, emitNative(jvStatus_, cfg_.network)};
 }
 
 json::Value
@@ -391,7 +402,7 @@ PathSession::doClose()
     closing_.store(true, std::memory_order_release);
     std::lock_guard const sl(lock_);
     jvStatus_[xrpl::jss::closed] = true;
-    return jvStatus_;
+    return emitNative(jvStatus_, cfg_.network);
 }
 
 json::Value
@@ -399,7 +410,7 @@ PathSession::doStatus()
 {
     std::lock_guard const sl(lock_);
     jvStatus_[xrpl::jss::status] = xrpl::jss::success;
-    return jvStatus_;
+    return emitNative(jvStatus_, cfg_.network);
 }
 
 bool
@@ -861,7 +872,7 @@ PathSession::doUpdate(
         std::lock_guard const sl(lock_);
         jvStatus_ = newStatus;
     }
-    return newStatus;
+    return emitNative(std::move(newStatus), cfg_.network);
 }
 
 }  // namespace edgy

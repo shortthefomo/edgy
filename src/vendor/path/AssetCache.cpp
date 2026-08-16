@@ -825,6 +825,10 @@ AssetCache::getMPTs(AccountID const& account)
 
     std::vector<PathFindMPT> mpts;
     forEachItem(*ledger_, account, [&](SLE::const_ref sle) {
+        // Owner-dir Indexes can name a missing or unreadable child
+        // (apply gap, or a ledger type libxrpl cannot decode).
+        if (!sle)
+            return;
         if (sle->getType() == ltMPTOKEN_ISSUANCE)
         {
             auto const mptID = makeMptID(sle->getFieldU32(sfSequence), account);

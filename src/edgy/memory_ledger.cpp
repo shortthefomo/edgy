@@ -1,4 +1,5 @@
 #include <edgy/memory_ledger.hpp>
+#include <edgy/protocol.hpp>
 
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -219,16 +220,8 @@ MemoryLedger::materialize(xrpl::uint256 const& key, Item const& item) const
     if (item.sle)
         return item.sle;
 
-    try
-    {
-        xrpl::SerialIter sit(xrpl::makeSlice(item.blob));
-        item.sle = std::make_shared<xrpl::SLE const>(sit, key);
-        return item.sle;
-    }
-    catch (...)
-    {
-        return nullptr;
-    }
+    item.sle = sleFromBlob(item.blob, key);
+    return item.sle;
 }
 
 xrpl::SLE::const_pointer

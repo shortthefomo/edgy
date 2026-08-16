@@ -18,7 +18,7 @@ namespace edgy {
  * HTTP JSON-RPC + WebSocket front end.
  *
  * path_find / ripple_path_find are answered from Engine (local memory).
- * Every other command is proxied to the upstream xrpld so the wire
+ * Every other command is proxied to the upstream xrpld/xahaud so the wire
  * envelope matches a real node.
  */
 class Server
