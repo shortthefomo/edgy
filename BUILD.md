@@ -189,9 +189,9 @@ This is the rippled-shaped path: Conan `Release` + CMake `Release`, then an iden
 
 ```bash
 .build/edgy-xrpld --version
-# edgy 0.1.5-b0+xrpld.<git>
+# edgy 0.1.5+xrpld.<git>
 .build/edgy-xahaud --version
-# edgy 0.1.5-b0+xahaud.<git>
+# edgy 0.1.5+xahaud.<git>
 ```
 
 A Debug Edgy prints `+DEBUG` in the version (same idea as `xrpld --version`). Do not mix a Release Edgy with a Debug `libxrpl.a`.
@@ -225,7 +225,7 @@ rippled also has a *product* release: bump `versionString` in `BuildInfo.cpp`, t
 | Tag `X.Y.Z`, GitHub Release | Tag `vX.Y.Z`, attach `.build/edgy-xrpld` and `.build/edgy-xahaud` |
 | `package/` deb/rpm + `on-tag.yml` | Skip until there is more than one installer |
 
-Current release is `0.1.4`. After that tag, bump develop to `0.1.5-b0` before more work. To cut the next release:
+Current release is `0.1.5`. After that tag, bump develop to `0.1.6-b0` before more work. To cut the next release:
 
 ```bash
 # 1. set kVersionBase to "X.Y.Z" (and project(edgy VERSION X.Y.Z) if the

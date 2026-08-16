@@ -40,7 +40,7 @@ Open subscriptions are **repriced every 100ms**. Ledger close also reprices. At 
 
 Binaries and notes: [github.com/shortthefomo/edgy/releases](https://github.com/shortthefomo/edgy/releases). Latest: [releases/latest](https://github.com/shortthefomo/edgy/releases/latest).
 
-Current develop builds `edgy-xrpld` and `edgy-xahaud`. Tags through **v0.1.4** shipped a single `edgy-<version>-<os>-<arch>` binary with a `[network]` switch — do not mix that release with these example configs.
+Current releases ship `edgy-xrpld` and `edgy-xahaud`. Tags through **v0.1.4** shipped a single `edgy-<version>-<os>-<arch>` binary with a `[network]` switch — do not mix those with these example configs.
 
 Other platforms should [build from source](BUILD.md) until matching assets are attached.
 
