@@ -1,5 +1,6 @@
 #pragma once
 
+#include <edgy/compat.hpp>
 #include <edgy/config.hpp>
 
 #include <xrpl/basics/Blob.h>
@@ -7,6 +8,7 @@
 #include <xrpl/json/json_value.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 
+#include <memory>
 #include <string>
 
 namespace edgy {
@@ -14,10 +16,10 @@ namespace edgy {
 // Parse a ledger object, dropping field codes libxrpl does not know
 // (xahaud Hook/reward extras). Returns nullptr if the type itself is
 // unknown or required path-find fields cannot be recovered.
-[[nodiscard]] xrpl::SLE::pointer
+[[nodiscard]] std::shared_ptr<xrpl::SLE>
 sleFromBlob(xrpl::Blob const& blob, xrpl::uint256 const& key);
 
-[[nodiscard]] xrpl::SLE::pointer
+[[nodiscard]] std::shared_ptr<xrpl::SLE>
 sleFromBinary(std::string const& dataHex, std::string const& indexHex);
 
 // Drop JSON keys that are not SFields so STParsedJSON can apply

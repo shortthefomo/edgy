@@ -1,5 +1,7 @@
 #include <xrpld/rpc/detail/AssetCache.h>
 
+#include <edgy/compat.hpp>
+
 #include <xrpld/rpc/detail/MPT.h>
 #include <xrpld/rpc/detail/TrustLine.h>
 #include <xrpld/rpc/detail/Tuning.h>
@@ -74,7 +76,7 @@ AssetCache::AssetCache(
     , cacheReuseLedgers_(cacheReuseLedgers)
     , lineChunkSize_(lineChunkSize == 0 ? rpc::tuning::kPathFindLineChunkSize : lineChunkSize)
 {
-    JLOG(journal_.debug()) << "created for ledger " << ledger_->header().seq
+    JLOG(journal_.debug()) << "created for ledger " << edgy::viewHeader(*ledger_).seq
                            << " maxTotalLines=" << maxTotalLines_
                            << " maxLinesPerAccount=" << maxLinesPerAccount_
                            << " cacheReuseLedgers=" << cacheReuseLedgers_
@@ -83,7 +85,7 @@ AssetCache::AssetCache(
 
 AssetCache::~AssetCache()
 {
-    JLOG(journal_.debug()) << "destroyed for ledger " << ledger_->header().seq << " with "
+    JLOG(journal_.debug()) << "destroyed for ledger " << edgy::viewHeader(*ledger_).seq << " with "
                            << lines_.size() << " accounts and "
                            << totalLineCount_.load(std::memory_order_relaxed)
                            << " trust lines (hits=" << cacheHits_.load(std::memory_order_relaxed)
@@ -110,8 +112,8 @@ AssetCache::advanceLedger(std::shared_ptr<ReadView const> const& ledger, bool fo
     if (!ledger)
         return;
 
-    auto const oldSeq = ledger_->header().seq;
-    auto const newSeq = ledger->header().seq;
+    auto const oldSeq = edgy::viewHeader(*ledger_).seq;
+    auto const newSeq = edgy::viewHeader(*ledger).seq;
     // Same sequence, new view: mid-close overlay publish or open → closed.
     // Swap the ReadView so BookTip / RippleCalc see new offers, but do not
     // evict cached lines (that work is for a real ledger advance).
@@ -422,7 +424,7 @@ std::shared_ptr<std::vector<PathFindTrustLine>>
 AssetCache::loadOutgoingUnlocked(AccountID const& accountID)
 {
     // Caller holds unique lock_.
-    auto const curSeq = ledger_->header().seq;
+    auto const curSeq = edgy::viewHeader(*ledger_).seq;
     auto it = lines_.find(accountID);
 
     std::size_t preservedPins = 0;
@@ -552,7 +554,7 @@ AssetCache::getOrLoadOutgoing(AccountID const& accountID)
 
     {
         std::shared_lock const sl(lock_);
-        auto const curSeq = ledger_->header().seq;
+        auto const curSeq = edgy::viewHeader(*ledger_).seq;
         auto it = lines_.find(accountID);
         if (it != lines_.end())
         {
@@ -574,7 +576,7 @@ AssetCache::getOrLoadOutgoing(AccountID const& accountID)
     }
 
     std::unique_lock const sl(lock_);
-    auto const curSeq = ledger_->header().seq;
+    auto const curSeq = edgy::viewHeader(*ledger_).seq;
     auto it = lines_.find(accountID);
     if (it != lines_.end())
     {
@@ -824,7 +826,7 @@ AssetCache::getMPTs(AccountID const& account)
         return it->second;
 
     std::vector<PathFindMPT> mpts;
-    forEachItem(*ledger_, account, [&](SLE::const_ref sle) {
+    forEachItem(*ledger_, account, [&](std::shared_ptr<SLE const> const& sle) {
         // Owner-dir Indexes can name a missing or unreadable child
         // (apply gap, or a ledger type libxrpl cannot decode).
         if (!sle)

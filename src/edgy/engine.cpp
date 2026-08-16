@@ -1,9 +1,12 @@
 #include <edgy/engine.hpp>
 
+#include <edgy/compat.hpp>
 #include <edgy/protocol.hpp>
 #include <edgy/thread_pool.hpp>
 
+#ifndef EDGY_XAHAU
 #include <xrpld/rpc/detail/Pathfinder.h>
+#endif
 #include <xrpld/rpc/detail/Tuning.h>
 
 #include <xrpl/basics/Log.h>
@@ -13,6 +16,7 @@
 #include <xrpl/json/to_string.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/ErrorCodes.h>
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/STParsedJSON.h>
 #include <xrpl/protocol/detail/STVar.h>
@@ -381,7 +385,9 @@ Engine::Engine(boost::asio::io_context& io, Config cfg, std::shared_ptr<NodeClie
     , services_(io)
     , pool_(std::make_unique<ThreadPool>(static_cast<std::size_t>(cfg_.workers)))
 {
+#ifndef EDGY_XAHAU
     xrpl::Pathfinder::initPathTable();
+#endif
 }
 
 Engine::~Engine()
@@ -434,7 +440,7 @@ Engine::ledger() const
 json::Value
 Engine::statusJson() const
 {
-    json::Value j{json::ValueType::Object};
+    json::Value j{kJsonObject};
     std::lock_guard lock(stateMutex_);
     j["server_state"] = ready_.load() ? "full" : "syncing";
     j["load_factor"] = 1;
@@ -445,7 +451,7 @@ Engine::statusJson() const
         j[xrpl::jss::ledger_index] = seq;
         j[xrpl::jss::ledger_hash] = to_string(published_->header().hash);
         j[xrpl::jss::complete_ledgers] = std::to_string(first) + "-" + std::to_string(seq);
-        json::Value vl{json::ValueType::Object};
+        json::Value vl{kJsonObject};
         vl[xrpl::jss::seq] = seq;
         vl[xrpl::jss::hash] = to_string(published_->header().hash);
         vl["base_fee_xrp"] = 0.00001;
@@ -494,7 +500,7 @@ Engine::noteSearchMs(std::uint64_t ms)
 json::Value
 Engine::pathCountsJson() const
 {
-    json::Value j{json::ValueType::Object};
+    json::Value j{kJsonObject};
     auto setU64 = [](json::Value& obj, char const* key, std::uint64_t v) {
         obj[key] = static_cast<double>(v);
     };
@@ -761,8 +767,8 @@ Engine::syncLoop()
             // triggers another full snapshot.
             if (!subscribed)
             {
-                json::Value sub{json::ValueType::Object};
-                sub[xrpl::jss::streams] = json::Value{json::ValueType::Array};
+                json::Value sub{kJsonObject};
+                sub[xrpl::jss::streams] = json::Value{kJsonArray};
                 sub[xrpl::jss::streams].append("ledger");
                 sub[xrpl::jss::streams].append("transactions");
                 sub[xrpl::jss::binary] = true;
@@ -783,7 +789,7 @@ Engine::syncLoop()
             if (auto view = ledger())
             {
                 std::cerr << "sync ready ledger " << view->seq() << " "
-                          << shortHash(view->header().hash) << " objects=" << objects_.load()
+                          << shortHash(viewHeader(*view).hash) << " objects=" << objects_.load()
                           << " books=" << services_.books().bookCount()
                           << "; following node closes\n";
             }
@@ -860,7 +866,7 @@ Engine::loadSnapshot()
     }
     builder_.clear();
     builder_.reserve(25'000'000);
-    json::Value ledgerReq{json::ValueType::Object};
+    json::Value ledgerReq{kJsonObject};
     ledgerReq[xrpl::jss::ledger_index] = "validated";
     auto ledgerRes = node_->request("ledger", ledgerReq, std::chrono::minutes{2});
     if (ledgerRes.isMember(xrpl::jss::error))
@@ -886,7 +892,7 @@ Engine::loadSnapshot()
         {
             if (stop_.load())
                 throw std::runtime_error("stopped");
-            json::Value req{json::ValueType::Object};
+            json::Value req{kJsonObject};
             // String index: Clio/public hubs accept it; numeric can fail.
             req[xrpl::jss::ledger_index] = std::to_string(header.seq);
             req[xrpl::jss::binary] = true;
@@ -1505,7 +1511,7 @@ json::Value
 Engine::ledgerClosedJson() const
 {
     std::lock_guard lock(stateMutex_);
-    json::Value j{json::ValueType::Object};
+    json::Value j{kJsonObject};
     j[xrpl::jss::type] = "ledgerClosed";
     auto const seq = published_ ? published_->seq() : currentSeq_.load();
     if (seq == 0)

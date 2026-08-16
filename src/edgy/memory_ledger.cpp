@@ -31,7 +31,7 @@ keepDecoded(xrpl::SLE const& sle)
 }
 
 void
-applyFeesFromSle(xrpl::Fees& fees, xrpl::SLE::const_ref sle)
+applyFeesFromSle(xrpl::Fees& fees, std::shared_ptr<xrpl::SLE const> const& sle)
 {
     if (sle->isFieldPresent(xrpl::sfBaseFee))
         fees.base = xrpl::XRPAmount{static_cast<std::int64_t>(sle->getFieldU64(xrpl::sfBaseFee))};
@@ -53,7 +53,7 @@ applyFeesFromSle(xrpl::Fees& fees, xrpl::SLE::const_ref sle)
 }
 
 xrpl::Blob
-serializeSle(xrpl::SLE::const_ref sle)
+serializeSle(std::shared_ptr<xrpl::SLE const> const& sle)
 {
     xrpl::Serializer s;
     sle->add(s);
@@ -162,11 +162,19 @@ MemoryLedger::MemoryLedger(
         overlay_ = std::make_shared<Overlay>();
 }
 
+#ifdef EDGY_XAHAU
+xrpl::LedgerInfo const&
+MemoryLedger::info() const
+{
+    return header_;
+}
+#else
 xrpl::LedgerHeader const&
 MemoryLedger::header() const
 {
     return header_;
 }
+#endif
 
 bool
 MemoryLedger::open() const
@@ -211,7 +219,7 @@ MemoryLedger::firstKey() const
     return succ(zero);
 }
 
-xrpl::SLE::const_pointer
+std::shared_ptr<xrpl::SLE const>
 MemoryLedger::materialize(xrpl::uint256 const& key, Item const& item) const
 {
     std::mutex& mutex =
@@ -224,7 +232,7 @@ MemoryLedger::materialize(xrpl::uint256 const& key, Item const& item) const
     return item.sle;
 }
 
-xrpl::SLE::const_pointer
+std::shared_ptr<xrpl::SLE const>
 MemoryLedger::sleOf(xrpl::uint256 const& key) const
 {
     auto const* item = findItem(key);
@@ -292,7 +300,7 @@ MemoryLedger::succ(key_type const& key, std::optional<key_type> const& last) con
     }
 }
 
-xrpl::SLE::const_pointer
+std::shared_ptr<xrpl::SLE const>
 MemoryLedger::read(xrpl::Keylet const& k) const
 {
     auto const sle = sleOf(k.key);
@@ -450,7 +458,7 @@ LedgerBuilder::put(xrpl::uint256 const& key, MemoryLedger::Item item)
 }
 
 void
-LedgerBuilder::upsert(xrpl::SLE::const_pointer sle)
+LedgerBuilder::upsert(std::shared_ptr<xrpl::SLE const> sle)
 {
     if (!sle)
         return;
@@ -464,7 +472,7 @@ void
 LedgerBuilder::upsertRaw(
     xrpl::uint256 const& key,
     xrpl::Blob blob,
-    xrpl::SLE::const_pointer decoded)
+    std::shared_ptr<xrpl::SLE const> decoded)
 {
     MemoryLedger::Item item;
     item.blob = std::move(blob);
@@ -506,7 +514,7 @@ LedgerBuilder::contains(xrpl::uint256 const& key) const
     return base_ && base_->items.contains(key);
 }
 
-xrpl::SLE::pointer
+std::shared_ptr<xrpl::SLE>
 LedgerBuilder::clone(xrpl::uint256 const& key) const
 {
     MemoryLedger::Item const* item = nullptr;

@@ -7,8 +7,7 @@
 
 namespace edgy {
 
-// Which ledger family [node] speaks. Both use the same public WS/RPC
-// (ledger_data, subscribe, server_state). xahau native JSON is XAH.
+// Fixed by which binary was built. Not a config/CLI switch.
 enum class NetworkKind
 {
     xrpl,
@@ -43,7 +42,11 @@ struct Config
     bool proxyOther{true};
     bool fullSnapshot{true};
 
-    NetworkKind network{NetworkKind::xrpl};
+#ifdef EDGY_XAHAU
+    static constexpr NetworkKind network = NetworkKind::xahau;
+#else
+    static constexpr NetworkKind network = NetworkKind::xrpl;
+#endif
 
     [[nodiscard]] bool
     xahau() const

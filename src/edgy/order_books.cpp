@@ -1,5 +1,7 @@
 #include <edgy/order_books.hpp>
 
+#include <edgy/book_util.hpp>
+
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -15,6 +17,7 @@ namespace edgy {
 void
 LocalOrderBooks::addBookUnlocked(xrpl::Book const& book)
 {
+#ifndef EDGY_XAHAU
     if (book.domain)
     {
         domainBooks_[{book.in, *book.domain}].insert(book.out);
@@ -23,6 +26,7 @@ LocalOrderBooks::addBookUnlocked(xrpl::Book const& book)
             xrpDomainBooks_.insert({book.in, *book.domain});
         return;
     }
+#endif
 
     allBooks_[book.in].insert(book.out);
     reverseBooks_[book.out].insert(book.in);
@@ -48,6 +52,7 @@ LocalOrderBooks::setQualityUnlocked(xrpl::Book const& book, std::uint64_t qualit
 void
 LocalOrderBooks::removeBookUnlocked(xrpl::Book const& book)
 {
+#ifndef EDGY_XAHAU
     if (book.domain)
     {
         if (auto it = domainBooks_.find({book.in, *book.domain}); it != domainBooks_.end())
@@ -68,6 +73,7 @@ LocalOrderBooks::removeBookUnlocked(xrpl::Book const& book)
         tipQuality_.erase(book);
         return;
     }
+#endif
 
     if (auto it = allBooks_.find(book.in); it != allBooks_.end())
     {
@@ -112,7 +118,7 @@ LocalOrderBooks::addOrderBook(xrpl::Book const& book)
 }
 
 void
-LocalOrderBooks::addFromSle(xrpl::SLE::const_ref sle)
+LocalOrderBooks::addFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
 {
     if (!sle)
         return;
@@ -128,10 +134,12 @@ LocalOrderBooks::addFromSle(xrpl::SLE::const_ref sle)
             issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
             book.in = issue;
         }
+#ifndef EDGY_XAHAU
         else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
         {
             book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
         }
+#endif
         else
         {
             return;
@@ -144,15 +152,19 @@ LocalOrderBooks::addFromSle(xrpl::SLE::const_ref sle)
             issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
             book.out = issue;
         }
+#ifndef EDGY_XAHAU
         else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
         {
             book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
         }
+#endif
         else
         {
             return;
         }
+#ifndef EDGY_XAHAU
         book.domain = (*sle)[~xrpl::sfDomainID];
+#endif
         addOrderBook(book);
         std::uint64_t q = xrpl::getQuality(sle->key());
         if (sle->isFieldPresent(xrpl::sfExchangeRate))
@@ -173,13 +185,13 @@ LocalOrderBooks::addFromSle(xrpl::SLE::const_ref sle)
             return;
         auto const asset1 = (*sle)[xrpl::sfAsset];
         auto const asset2 = (*sle)[xrpl::sfAsset2];
-        addOrderBook({asset1, asset2, std::nullopt});
-        addOrderBook({asset2, asset1, std::nullopt});
+        addOrderBook(makeBook(asset1, asset2));
+        addOrderBook(makeBook(asset2, asset1));
     }
 }
 
 void
-LocalOrderBooks::removeFromSle(xrpl::SLE::const_ref sle)
+LocalOrderBooks::removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
 {
     if (!sle)
         return;
@@ -195,10 +207,12 @@ LocalOrderBooks::removeFromSle(xrpl::SLE::const_ref sle)
             issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
             book.in = issue;
         }
+#ifndef EDGY_XAHAU
         else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
         {
             book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
         }
+#endif
         else
         {
             return;
@@ -210,15 +224,19 @@ LocalOrderBooks::removeFromSle(xrpl::SLE::const_ref sle)
             issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
             book.out = issue;
         }
+#ifndef EDGY_XAHAU
         else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
         {
             book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
         }
+#endif
         else
         {
             return;
         }
+#ifndef EDGY_XAHAU
         book.domain = (*sle)[~xrpl::sfDomainID];
+#endif
         std::lock_guard const lock(lock_);
         removeBookUnlocked(book);
         return;
@@ -231,8 +249,8 @@ LocalOrderBooks::removeFromSle(xrpl::SLE::const_ref sle)
         auto const asset1 = (*sle)[xrpl::sfAsset];
         auto const asset2 = (*sle)[xrpl::sfAsset2];
         std::lock_guard const lock(lock_);
-        removeBookUnlocked({asset1, asset2, std::nullopt});
-        removeBookUnlocked({asset2, asset1, std::nullopt});
+        removeBookUnlocked(makeBook(asset1, asset2));
+        removeBookUnlocked(makeBook(asset2, asset1));
     }
 }
 
@@ -281,10 +299,12 @@ LocalOrderBooks::setup(std::shared_ptr<xrpl::ReadView const> const& ledger)
                     issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
                     book.in = issue;
                 }
+#ifndef EDGY_XAHAU
                 else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
                 {
                     book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
                 }
+#endif
                 else
                 {
                     continue;
@@ -296,14 +316,17 @@ LocalOrderBooks::setup(std::shared_ptr<xrpl::ReadView const> const& ledger)
                     issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
                     book.out = issue;
                 }
+#ifndef EDGY_XAHAU
                 else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
                 {
                     book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
                 }
+#endif
                 else
                 {
                     continue;
                 }
+#ifndef EDGY_XAHAU
                 book.domain = (*sle)[~xrpl::sfDomainID];
                 if (book.domain)
                 {
@@ -313,6 +336,7 @@ LocalOrderBooks::setup(std::shared_ptr<xrpl::ReadView const> const& ledger)
                         xrpDomainBooks.insert({book.in, *book.domain});
                 }
                 else
+#endif
                 {
                     allBooks[book.in].insert(book.out);
                     reverseBooks[book.out].insert(book.in);
@@ -377,7 +401,7 @@ LocalOrderBooks::getBooksByTakerPays(
         {
             ret.reserve(it->second.size());
             for (auto const& gets : it->second)
-                ret.emplace_back(asset, gets, domain);
+                ret.push_back(makeBook(asset, gets, domain));
         }
     };
     if (!domain)
@@ -512,7 +536,7 @@ LocalOrderBooks::tipQuality(
 {
     std::lock_guard const lock(lock_);
     std::uint64_t best = kNoQuality;
-    xrpl::Book const book{in, out, domain};
+    xrpl::Book const book = makeBook(in, out, domain);
     if (auto it = tipQuality_.find(book); it != tipQuality_.end())
         best = it->second;
     if (auto tit = tokenTip_.find(xrpl::PathAsset{in}); tit != tokenTip_.end())

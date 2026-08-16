@@ -30,11 +30,20 @@ CMake looks for rippled as a **sibling** of this repository by default:
 Ledgers/
   rippled/          XRPL reference implementation
     .build/         rippled CMake + Conan output (must contain libxrpl.a)
+  xahaud/           Xahau node (https://github.com/Xahau/xahaud)
+    .build/         xahaud CMake output (must contain libxrpl.a)
   edgy/             this repository
     .build/         Edgy CMake output
 ```
 
-Override the locations with `-DRIPPLED_ROOT=` and `-DRIPPLED_BUILD=` if your trees are elsewhere.
+One CMake build produces **two** binaries. They cannot share a single `libxrpl`:
+
+| Binary | Links | Talks to |
+| --- | --- | --- |
+| `edgy-xrpld` | rippled `libxrpl.a` | `xrpld` |
+| `edgy-xahaud` | xahaud `libxrpl.a` plus xahaud RippleCalc/Flow sources | `xahaud` |
+
+Override the locations with `-DRIPPLED_ROOT=` / `-DRIPPLED_BUILD=` and `-DXAHAUD_ROOT=` / `-DXAHAUD_BUILD=` if your trees are elsewhere.
 
 ## Steps
 
@@ -79,6 +88,12 @@ Use the same `CMAKE_BUILD_TYPE` (Release or Debug) for Edgy as you passed to Con
 
 A **Release** binary is the optimized one you run against a live node. A **Debug** binary is for stepping in a debugger and is much slower. rippled uses the same split: Conan’s `build_type` and CMake’s `CMAKE_BUILD_TYPE` must both be `Release`.
 
+### 1b. Build xahaud / libxrpl
+
+Same idea in the xahaud tree (its own Conan + CMake). You need `../xahaud/.build/libxrpl.a`. Edgy compiles xahaud’s RippleCalc/Flow sources from `XAHAUD_ROOT` and links that library — path finding is not in xahaud’s `libxrpl`.
+
+Use the same `CMAKE_BUILD_TYPE` as rippled and Edgy.
+
 ### 2. Configure Edgy
 
 From the Edgy repository root:
@@ -88,11 +103,13 @@ cmake -S . -B .build \
   -DCMAKE_TOOLCHAIN_FILE=../rippled/.build/build/generators/conan_toolchain.cmake \
   -DCMAKE_BUILD_TYPE=Release \
   -DRIPPLED_ROOT=../rippled \
-  -DRIPPLED_BUILD=../rippled/.build
+  -DRIPPLED_BUILD=../rippled/.build \
+  -DXAHAUD_ROOT=../xahaud \
+  -DXAHAUD_BUILD=../xahaud/.build
 ```
 
 If `CMAKE_TOOLCHAIN_FILE` is omitted, CMake will pick
-`${RIPPLED_ROOT}/.build/build/generators/conan_toolchain.cmake` when that file exists. Passing it explicitly is clearer when the rippled build directory is not the default.
+`${RIPPLED_ROOT}/.build/build/generators/conan_toolchain.cmake` when that file exists. Passing it explicitly is clearer when the rippled build directory is not the default. Both node trees still have to be built first.
 
 Single-config generators (`Unix Makefiles`, `Ninja`) need `CMAKE_BUILD_TYPE`. Multi-config generators (Visual Studio, Xcode) select the config at build time instead.
 
@@ -118,14 +135,15 @@ This produces:
 
 | Target | Output |
 | --- | --- |
-| `edgy` | `.build/edgy` — the sidecar |
-| `edgy_tests` | `.build/edgy_tests` — unit tests |
-| `edgy_core` | static library used by both |
+| `edgy-xrpld` | `.build/edgy-xrpld` — sidecar linked to rippled libxrpl |
+| `edgy-xahaud` | `.build/edgy-xahaud` — sidecar linked to xahaud libxrpl |
+| `edgy_tests` | `.build/edgy_tests` — unit tests (rippled libxrpl) |
 
 Build one target:
 
 ```bash
-cmake --build .build --parallel --target edgy
+cmake --build .build --parallel --target edgy-xrpld
+cmake --build .build --parallel --target edgy-xahaud
 cmake --build .build --parallel --target edgy_tests
 ```
 
@@ -148,15 +166,16 @@ On a multi-config generator the binaries sit under `.build/Release/` (or `.build
 Configuration and the RPC/WS API are documented in [`README.md`](README.md). After a successful build:
 
 ```bash
-cp cfg/edgy.example.cfg edgy.cfg
-# edit [node] to your xrpld or xahaud WebSocket
-# for xahaud: set [network] xahau  or pass --xahau
-.build/edgy --conf edgy.cfg
+cp cfg/edgy-xrpl.example.cfg edgy-xrpl.cfg
+cp cfg/edgy-xahau.example.cfg edgy-xahau.cfg
+# edit [node] in each file to your node WebSocket
+.build/edgy-xrpld --conf edgy-xrpl.cfg
+.build/edgy-xahaud --conf edgy-xahau.cfg
 ```
 
 Startup requires the upstream `server_state` to be `full`, `proposing`, or `unknown`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
 
-Against [xahaud](https://github.com/Xahau/xahaud), Edgy still links `libxrpl` from **rippled**, not from a xahaud tree. xahaud’s headers are `namespace ripple` and do not provide the ServiceRegistry / RippleCalc API Edgy is written against; one process also cannot link both libraries. Set `[network] xahau` so native JSON uses `XAH`. Hook / URIToken objects stay as blobs; the book graph uses offers and lines.
+Pick the binary that matches the node. The two `libxrpl`s cannot live in one process. `edgy-xahaud` compiles xahaud RippleCalc/Flow from `XAHAUD_ROOT` and links xahaud `libxrpl.a`. Native JSON is `XAH`. Hook / URIToken objects stay as blobs; the book graph uses offers and lines.
 
 ## Release build
 
@@ -169,8 +188,10 @@ This is the rippled-shaped path: Conan `Release` + CMake `Release`, then an iden
 3. Check it:
 
 ```bash
-.build/edgy --version
-# edgy 0.1.4+<git>
+.build/edgy-xrpld --version
+# edgy 0.1.5-b0+xrpld.<git>
+.build/edgy-xahaud --version
+# edgy 0.1.5-b0+xahaud.<git>
 ```
 
 A Debug Edgy prints `+DEBUG` in the version (same idea as `xrpld --version`). Do not mix a Release Edgy with a Debug `libxrpl.a`.
@@ -179,14 +200,16 @@ Install like rippled’s `cmake --install`:
 
 ```bash
 cmake --install .build --prefix /usr/local
-# /usr/local/bin/edgy
-# /usr/local/etc/edgy/edgy.cfg   (from cfg/edgy.example.cfg)
+# /usr/local/bin/edgy-xrpld
+# /usr/local/bin/edgy-xahaud
+# /usr/local/etc/edgy/edgy-xrpl.example.cfg
+# /usr/local/etc/edgy/edgy-xahau.example.cfg
 ```
 
 On a multi-config generator (Visual Studio / Xcode):
 
 ```bash
-cmake --build .build --config Release --parallel --target edgy
+cmake --build .build --config Release --parallel --target edgy-xrpld edgy-xahaud
 cmake --install .build --config Release --prefix /usr/local
 ```
 
@@ -199,7 +222,7 @@ rippled also has a *product* release: bump `versionString` in `BuildInfo.cpp`, t
 | Work on `develop` | Same |
 | `versionString = "X.Y.Z-bN"` on develop | `kVersionBase` in `include/edgy/version.hpp` |
 | Signed commit “Set version to X.Y.Z” | Same, edit `kVersionBase` and `project(edgy VERSION …)` |
-| Tag `X.Y.Z`, GitHub Release | Tag `vX.Y.Z`, attach `.build/edgy` (and optionally a tarball) |
+| Tag `X.Y.Z`, GitHub Release | Tag `vX.Y.Z`, attach `.build/edgy-xrpld` and `.build/edgy-xahaud` |
 | `package/` deb/rpm + `on-tag.yml` | Skip until there is more than one installer |
 
 Current release is `0.1.4`. After that tag, bump develop to `0.1.5-b0` before more work. To cut the next release:
@@ -208,7 +231,7 @@ Current release is `0.1.4`. After that tag, bump develop to `0.1.5-b0` before mo
 # 1. set kVersionBase to "X.Y.Z" (and project(edgy VERSION X.Y.Z) if the
 #    CMake project version should match)
 # 2. signed commit: Set version to X.Y.Z
-# 3. cmake Release rebuild, run edgy_tests, .build/edgy --version
+# 3. cmake Release rebuild, run edgy_tests, both binaries --version
 # 4. git tag -s vX.Y.Z -m "edgy X.Y.Z"
 # 5. git push origin develop --tags
 ```
@@ -219,6 +242,8 @@ Current release is `0.1.4`. After that tag, bump develop to `0.1.5-b0` before mo
 | --- | --- | --- |
 | `RIPPLED_ROOT` | `${CMAKE_SOURCE_DIR}/../rippled` | rippled source tree (headers under `include/xrpl`) |
 | `RIPPLED_BUILD` | `${RIPPLED_ROOT}/.build` | rippled build tree that contains `libxrpl.a` and Conan generators |
+| `XAHAUD_ROOT` | `${CMAKE_SOURCE_DIR}/../xahaud` | xahaud source tree (RippleCalc / Flow live under `src/xrpld`) |
+| `XAHAUD_BUILD` | `${XAHAUD_ROOT}/.build` | xahaud build tree that contains `libxrpl.a` |
 | `CMAKE_TOOLCHAIN_FILE` | `${RIPPLED_ROOT}/.build/build/generators/conan_toolchain.cmake` if present | Conan toolchain; must match the rippled install |
 | `CMAKE_BUILD_TYPE` | (generator default) | `Release` or `Debug`; must match Conan’s `build_type` |
 

@@ -1,5 +1,7 @@
 #include <xrpld/rpc/detail/TrustLine.h>
 
+#include <edgy/compat.hpp>
+
 #include <xrpl/json/json_value.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/DirectoryHelpers.h>
@@ -19,7 +21,7 @@
 
 namespace xrpl {
 
-TrustLineBase::TrustLineBase(SLE::const_ref sle, AccountID const& viewAccount)
+TrustLineBase::TrustLineBase(std::shared_ptr<SLE const> const& sle, AccountID const& viewAccount)
     : key_(sle->key())
     , lowLimit_(sle->getFieldAmount(sfLowLimit))
     , highLimit_(sle->getFieldAmount(sfHighLimit))
@@ -34,14 +36,14 @@ TrustLineBase::TrustLineBase(SLE::const_ref sle, AccountID const& viewAccount)
 json::Value
 TrustLineBase::getJson(int)
 {
-    json::Value ret(json::ValueType::Object);
+    json::Value ret(edgy::kJsonObject);
     ret["low_id"] = to_string(lowLimit_.getIssuer());
     ret["high_id"] = to_string(highLimit_.getIssuer());
     return ret;
 }
 
 std::optional<PathFindTrustLine>
-PathFindTrustLine::makeItem(AccountID const& accountID, SLE::const_ref sle)
+PathFindTrustLine::makeItem(AccountID const& accountID, std::shared_ptr<SLE const> const& sle)
 {
     if (!sle || sle->getType() != ltRIPPLE_STATE)
         return {};
@@ -160,7 +162,7 @@ getTrustLineItems(
     LineDirection direction = LineDirection::Outgoing)
 {
     std::vector<T> items;
-    forEachItem(view, accountID, [&items, &accountID, &direction](SLE::const_ref sleCur) {
+    forEachItem(view, accountID, [&items, &accountID, &direction](std::shared_ptr<SLE const> const& sleCur) {
         if (!sleCur)
             return;
         auto ret = T::makeItem(accountID, sleCur);
@@ -174,7 +176,7 @@ getTrustLineItems(
 }
 }  // namespace detail
 
-RPCTrustLine::RPCTrustLine(SLE::const_ref sle, AccountID const& viewAccount)
+RPCTrustLine::RPCTrustLine(std::shared_ptr<SLE const> const& sle, AccountID const& viewAccount)
     : TrustLineBase(sle, viewAccount)
     , lowQualityIn_(sle->getFieldU32(sfLowQualityIn))
     , lowQualityOut_(sle->getFieldU32(sfLowQualityOut))
@@ -184,7 +186,7 @@ RPCTrustLine::RPCTrustLine(SLE::const_ref sle, AccountID const& viewAccount)
 }
 
 std::optional<RPCTrustLine>
-RPCTrustLine::makeItem(AccountID const& accountID, SLE::const_ref sle)
+RPCTrustLine::makeItem(AccountID const& accountID, std::shared_ptr<SLE const> const& sle)
 {
     if (!sle || sle->getType() != ltRIPPLE_STATE)
         return {};

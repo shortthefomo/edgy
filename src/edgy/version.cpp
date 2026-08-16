@@ -16,8 +16,17 @@ versionString()
 {
     std::string v{kVersionBase};
     std::string meta;
+#ifdef EDGY_XAHAU
+    meta += "xahaud";
+#else
+    meta += "xrpld";
+#endif
     if (kGitHash != nullptr && kGitHash[0] != '\0')
+    {
+        if (!meta.empty())
+            meta += '.';
         meta += kGitHash;
+    }
 #if !defined(NDEBUG)
     if (!meta.empty())
         meta += '.';

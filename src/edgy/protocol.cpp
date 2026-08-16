@@ -166,11 +166,15 @@ copyOrSkipPayload(xrpl::SerialIter& sit, xrpl::Serializer* out, int type)
             copyBytes(sit, out, 2);
             return;
         case xrpl::STI_UINT32:
+#ifndef EDGY_XAHAU
         case xrpl::STI_INT32:
+#endif
             copyBytes(sit, out, 4);
             return;
         case xrpl::STI_UINT64:
+#ifndef EDGY_XAHAU
         case xrpl::STI_INT64:
+#endif
             copyBytes(sit, out, 8);
             return;
         case xrpl::STI_UINT96:
@@ -210,9 +214,16 @@ copyOrSkipPayload(xrpl::SerialIter& sit, xrpl::Serializer* out, int type)
             auto const value = sit.get64();
             if (out)
                 out->add64(value);
-            if ((value & xrpl::STAmount::kIssuedCurrency) == 0)
+#ifdef EDGY_XAHAU
+            auto const issuedBit = xrpl::STAmount::cIssuedCurrency;
+            auto const mptBit = xrpl::STAmount::cMPToken;
+#else
+            auto const issuedBit = xrpl::STAmount::kIssuedCurrency;
+            auto const mptBit = xrpl::STAmount::kMpToken;
+#endif
+            if ((value & issuedBit) == 0)
             {
-                if ((value & xrpl::STAmount::kMpToken) != 0)
+                if ((value & mptBit) != 0)
                 {
                     auto const extra = sit.get8();
                     auto const mpt = sit.get192();
@@ -262,6 +273,18 @@ copyOrSkipPayload(xrpl::SerialIter& sit, xrpl::Serializer* out, int type)
                 auto const t = sit.get8();
                 if (out)
                     out->add8(t);
+#ifdef EDGY_XAHAU
+                if (t == xrpl::STPathElement::typeNone)
+                    return;
+                if (t == xrpl::STPathElement::typeBoundary)
+                    continue;
+                if ((t & xrpl::STPathElement::typeAccount) != 0)
+                    copyBytes(sit, out, 20);
+                if ((t & xrpl::STPathElement::typeCurrency) != 0)
+                    copyBytes(sit, out, 20);
+                if ((t & xrpl::STPathElement::typeIssuer) != 0)
+                    copyBytes(sit, out, 20);
+#else
                 if (t == xrpl::STPathElement::TypeNone)
                     return;
                 if (t == xrpl::STPathElement::TypeBoundary)
@@ -274,6 +297,7 @@ copyOrSkipPayload(xrpl::SerialIter& sit, xrpl::Serializer* out, int type)
                     copyBytes(sit, out, 24);
                 if ((t & xrpl::STPathElement::TypeIssuer) != 0)
                     copyBytes(sit, out, 20);
+#endif
             }
         }
         case xrpl::STI_XCHAIN_BRIDGE:
@@ -301,7 +325,7 @@ stripUnknownFields(xrpl::Blob const& blob)
     return kept.getData();
 }
 
-xrpl::SLE::pointer
+std::shared_ptr<xrpl::SLE>
 sleFromKnownFields(xrpl::Blob const& blob, xrpl::uint256 const& key)
 {
     xrpl::SerialIter sit(xrpl::makeSlice(blob));
@@ -394,10 +418,10 @@ rewriteNativeWalk(json::Value& v, bool inbound, bool xahau)
 
 }  // namespace
 
-xrpl::SLE::pointer
+std::shared_ptr<xrpl::SLE>
 sleFromBlob(xrpl::Blob const& blob, xrpl::uint256 const& key)
 {
-    auto tryParse = [&](xrpl::Blob const& data) -> xrpl::SLE::pointer {
+    auto tryParse = [&](xrpl::Blob const& data) -> std::shared_ptr<xrpl::SLE> {
         try
         {
             xrpl::SerialIter sit(xrpl::makeSlice(data));
@@ -433,7 +457,7 @@ sleFromBlob(xrpl::Blob const& blob, xrpl::uint256 const& key)
     }
 }
 
-xrpl::SLE::pointer
+std::shared_ptr<xrpl::SLE>
 sleFromBinary(std::string const& dataHex, std::string const& indexHex)
 {
     auto const blob = xrpl::strUnHex(dataHex);

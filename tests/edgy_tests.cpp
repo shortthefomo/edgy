@@ -37,6 +37,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -77,6 +79,7 @@ main()
         auto const v = versionString();
         expect(v.find(kVersionBase) == 0, "version string starts with kVersionBase");
         expect(!v.empty(), "version string is not empty");
+        expect(v.find("xrpld") != std::string::npos, "xrpld-linked tests report xrpld flavor");
     }
     {
         Config d;
@@ -85,10 +88,10 @@ main()
         expect(d.searchTimeout.count() == 0, "default [timeout-ms] is none");
         expect(d.fullSnapshot, "default [full-snapshot] is full");
         expect(d.midCloseDelay.count() == 100, "default [update-ms] is 100");
-        expect(d.network == NetworkKind::xrpl, "default [network] is xrpl");
-        expect(!d.xahau(), "default is not xahau");
-        expect(std::string{d.nativeCurrency()} == "XRP", "default native is XRP");
-        expect(std::string{d.nodeSoftware()} == "xrpld", "default node software is xrpld");
+        expect(d.network == NetworkKind::xrpl, "xrpld binary is xrpl");
+        expect(!d.xahau(), "xrpld binary is not xahau");
+        expect(std::string{d.nativeCurrency()} == "XRP", "xrpld native is XRP");
+        expect(std::string{d.nodeSoftware()} == "xrpld", "xrpld node software is xrpld");
     }
 
     {
@@ -150,6 +153,21 @@ main()
         auto view = b.publish();
         expect(view->exists(xrpl::keylet::account(src)), "created account is readable");
         expect(view->overlaySize() == 1 || view->size() == 1, "overlay/base holds the new object");
+
+        json::Value mod{json::ValueType::Object};
+        json::Value& modNodes = (mod["AffectedNodes"] = json::ValueType::Array);
+        json::Value& modWrap = modNodes.append(json::ValueType::Object);
+        json::Value& modified = (modWrap["ModifiedNode"] = json::ValueType::Object);
+        modified["LedgerEntryType"] = "AccountRoot";
+        modified["LedgerIndex"] = to_string(key);
+        json::Value& finals = (modified["FinalFields"] = json::ValueType::Object);
+        finals["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        finals["Balance"] = "20000000000";
+        finals["Sequence"] = 2;
+        auto const modStats = applyJsonAffectedNodes(b, books, mod);
+        expect(modStats.parseFail == 0, "JSON ModifiedNode parse succeeds");
+        expect(modStats.modified == 1 || modStats.applied() >= 1, "JSON ModifiedNode is applied");
+        expect(b.contains(key), "ModifiedNode keeps the account");
     }
 
     {
@@ -312,48 +330,19 @@ main()
         expect(cfg.searchFast == Config::kSearchFull, "stanza [search-fast] full");
         expect(cfg.searchTimeout.count() == 0, "stanza [timeout-ms] 0");
         expect(cfg.fullSnapshot, "stanza [full-snapshot] full");
-        expect(cfg.network == NetworkKind::xrpl, "stanza default [network] xrpl");
+        expect(cfg.network == NetworkKind::xrpl, "file cannot change compile-time network");
     }
 
     {
-        auto const path = std::string{"/tmp/edgy-test-xahau.cfg"};
+        auto const path = std::string{"/tmp/edgy-test-legacy-network.cfg"};
         {
             std::ofstream out(path);
             out << "[network]\nxahau\n[node]\nws://127.0.0.1:6006\n";
         }
         auto const cfg = Config::fromFile(path);
-        expect(cfg.network == NetworkKind::xahau, "stanza [network] xahau");
-        expect(cfg.xahau(), "xahau() is true");
-        expect(std::string{cfg.nativeCurrency()} == "XAH", "xahau native is XAH");
-        expect(std::string{cfg.nodeSoftware()} == "xahaud", "xahau node software is xahaud");
-    }
-
-    {
-        auto const path = std::string{"/tmp/edgy-test-xahaud-alias.cfg"};
-        {
-            std::ofstream out(path);
-            out << "[node-type]\nxahaud\n";
-        }
-        auto const cfg = Config::fromFile(path);
-        expect(cfg.network == NetworkKind::xahau, "stanza [node-type] xahaud");
-    }
-
-    {
-        auto const path = std::string{"/tmp/edgy-test-bad-network.cfg"};
-        {
-            std::ofstream out(path);
-            out << "[network]\nsolana\n";
-        }
-        bool threw = false;
-        try
-        {
-            (void)Config::fromFile(path);
-        }
-        catch (std::exception const&)
-        {
-            threw = true;
-        }
-        expect(threw, "invalid [network] throws");
+        expect(cfg.nodeWs == "ws://127.0.0.1:6006", "legacy [network] still loads [node]");
+        expect(cfg.network == NetworkKind::xrpl, "legacy [network] is ignored");
+        expect(!cfg.xahau(), "legacy [network] does not switch family");
     }
 
     {
@@ -412,8 +401,16 @@ main()
         char arg0[] = "edgy";
         char a1[] = "--xahau";
         char* argv[] = {arg0, a1, nullptr};
-        auto const cfg = Config::fromArgs(2, argv);
-        expect(cfg.network == NetworkKind::xahau, "CLI --xahau");
+        bool threw = false;
+        try
+        {
+            (void)Config::fromArgs(2, argv);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "CLI --xahau is rejected");
     }
 
     {
@@ -421,51 +418,254 @@ main()
         char a1[] = "--network";
         char a2[] = "xahau";
         char* argv[] = {arg0, a1, a2, nullptr};
-        auto const cfg = Config::fromArgs(3, argv);
-        expect(cfg.network == NetworkKind::xahau, "CLI --network xahau");
+        bool threw = false;
+        try
+        {
+            (void)Config::fromArgs(3, argv);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "CLI --network is rejected");
     }
 
     {
         char arg0[] = "edgy";
-        char arg1[] = "--conf";
-        auto const path = std::string{"/tmp/edgy-test-network-override.cfg"};
+        char a1[] = "--xrpl";
+        char* argv[] = {arg0, a1, nullptr};
+        bool threw = false;
+        try
         {
-            std::ofstream out(path);
-            out << "[network]\nxrpl\n";
+            (void)Config::fromArgs(2, argv);
         }
-        char arg2[128];
-        std::snprintf(arg2, sizeof(arg2), "%s", path.c_str());
-        char arg3[] = "--xahau";
-        char* argv[] = {arg0, arg1, arg2, arg3, nullptr};
-        auto const cfg = Config::fromArgs(4, argv);
-        expect(cfg.network == NetworkKind::xahau, "CLI --xahau overrides [network]");
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "CLI --xrpl is rejected");
     }
 
     {
-        char const* shipped[] = {
-            "cfg/edgy.example.cfg",
-            "/Users/fomo/Dev/Ledgers/PathFinder/cfg/edgy.example.cfg",
-        };
-        bool parsed = false;
-        for (auto const* p : shipped)
+        char arg0[] = "edgy";
+        char a1[] = "--xrpld";
+        char* argv[] = {arg0, a1, nullptr};
+        bool threw = false;
+        try
         {
-            std::ifstream probe(p);
-            if (!probe)
-                continue;
-            auto const cfg = Config::fromFile(p);
-            expect(cfg.listenWs == "0.0.0.0:6008", "shipped [listen-ws]");
-            expect(cfg.nodeWs == "ws://127.0.0.1:6006", "shipped [node]");
-            expect(cfg.debugLog == "/tmp/edgy.log" ||
-                       cfg.debugLog == "/private/tmp/edgy.log",
-                   "shipped [debug]");
-            expect(cfg.search == Config::kSearchFull, "shipped [search] full");
-            expect(cfg.searchFast == Config::kSearchFull, "shipped [search-fast] full");
-            expect(cfg.fullSnapshot, "shipped [full-snapshot] full");
-            expect(cfg.network == NetworkKind::xrpl, "shipped [network] xrpl");
-            parsed = true;
-            break;
+            (void)Config::fromArgs(2, argv);
         }
-        expect(parsed, "shipped edgy.example.cfg parses");
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "CLI --xrpld is rejected");
+    }
+
+    {
+        char const* prev = std::getenv("EDGY_NETWORK");
+        std::string saved = prev ? prev : "";
+        ::setenv("EDGY_NETWORK", "xahau", 1);
+        char arg0[] = "edgy";
+        char* argv[] = {arg0, nullptr};
+        bool threw = false;
+        try
+        {
+            (void)Config::fromArgs(1, argv);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        if (prev)
+            ::setenv("EDGY_NETWORK", saved.c_str(), 1);
+        else
+            ::unsetenv("EDGY_NETWORK");
+        expect(threw, "EDGY_NETWORK is rejected");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-node-type.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[node-type]\nxahaud\n[workers]\n8\n";
+        }
+        auto const cfg = Config::fromFile(path);
+        expect(cfg.workers == 8, "legacy [node-type] still loads other stanzas");
+        expect(cfg.network == NetworkKind::xrpl, "legacy [node-type] is ignored");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-clamp.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[workers]\n0\n[net-threads]\n0\n[update-ms]\n1\n"
+                << "[search]\n2\n[search-fast]\n4\n[timeout-ms]\n-5\n";
+        }
+        auto const cfg = Config::fromFile(path);
+        expect(cfg.workers == 1, "workers 0 clamps to 1");
+        expect(cfg.netThreads == 1, "net-threads 0 clamps to 1");
+        expect(cfg.midCloseDelay.count() == 20, "update-ms below 20 clamps to 20");
+        expect(cfg.search == 2, "search 2 is kept");
+        expect(cfg.searchFast == 2, "search-fast clamps to search");
+        expect(cfg.searchTimeout.count() == 0, "negative timeout-ms clamps to 0");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-workers-max.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[workers]\n999\n";
+        }
+        auto const cfg = Config::fromFile(path);
+        expect(cfg.workers == 256, "workers above 256 clamp to 256");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-unknown-section.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[not-a-stanza]\n1\n";
+        }
+        bool threw = false;
+        try
+        {
+            (void)Config::fromFile(path);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "unknown config section throws");
+    }
+
+    {
+        bool threw = false;
+        try
+        {
+            (void)Config::fromFile("/tmp/edgy-does-not-exist.cfg");
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "missing config file throws");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-bare.cfg"};
+        {
+            std::ofstream out(path);
+            out << "ws://127.0.0.1:1\n";
+        }
+        bool threw = false;
+        try
+        {
+            (void)Config::fromFile(path);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "value outside a section throws");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-pathfind-badkey.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[path_find]\nnot_a_key=1\n";
+        }
+        bool threw = false;
+        try
+        {
+            (void)Config::fromFile(path);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "unknown [path_find] key throws");
+    }
+
+    {
+        char arg0[] = "edgy";
+        char a1[] = "--not-a-flag";
+        char* argv[] = {arg0, a1, nullptr};
+        bool threw = false;
+        try
+        {
+            (void)Config::fromArgs(2, argv);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        expect(threw, "unknown CLI flag throws");
+    }
+
+    {
+        struct Shipped
+        {
+            char const* rel;
+            char const* abs;
+            char const* listenWs;
+            char const* listenRpc;
+            char const* debug;
+            char const* label;
+        };
+        Shipped const shipped[] = {
+            {"cfg/edgy-xrpl.example.cfg",
+             "/Users/fomo/Dev/Ledgers/PathFinder/cfg/edgy-xrpl.example.cfg",
+             "0.0.0.0:6008",
+             "0.0.0.0:5008",
+             "/tmp/edgy-xrpl.log",
+             "xrpl"},
+            {"cfg/edgy-xahau.example.cfg",
+             "/Users/fomo/Dev/Ledgers/PathFinder/cfg/edgy-xahau.example.cfg",
+             "0.0.0.0:6018",
+             "0.0.0.0:5018",
+             "/tmp/edgy-xahau.log",
+             "xahau"},
+        };
+        for (auto const& spec : shipped)
+        {
+            bool parsed = false;
+            for (char const* p : {spec.rel, spec.abs})
+            {
+                std::ifstream probe(p);
+                if (!probe)
+                    continue;
+                auto const cfg = Config::fromFile(p);
+                auto listenWs = std::string{"shipped [listen-ws] "} + spec.label;
+                auto listenRpc = std::string{"shipped [listen-rpc] "} + spec.label;
+                auto node = std::string{"shipped [node] "} + spec.label;
+                auto debug = std::string{"shipped [debug] "} + spec.label;
+                auto search = std::string{"shipped [search] full "} + spec.label;
+                auto searchFast = std::string{"shipped [search-fast] full "} + spec.label;
+                auto snapshot = std::string{"shipped [full-snapshot] full "} + spec.label;
+                expect(cfg.listenWs == spec.listenWs, listenWs.c_str());
+                expect(cfg.listenRpc == spec.listenRpc, listenRpc.c_str());
+                expect(cfg.nodeWs == "ws://127.0.0.1:6006", node.c_str());
+                expect(
+                    cfg.debugLog == spec.debug ||
+                        cfg.debugLog == (std::string{"/private"} + spec.debug),
+                    debug.c_str());
+                expect(cfg.search == Config::kSearchFull, search.c_str());
+                expect(cfg.searchFast == Config::kSearchFull, searchFast.c_str());
+                expect(cfg.fullSnapshot, snapshot.c_str());
+                auto workers = std::string{"shipped [workers] "} + spec.label;
+                auto proxy = std::string{"shipped [proxy] "} + spec.label;
+                auto update = std::string{"shipped [update-ms] "} + spec.label;
+                expect(cfg.workers == 64, workers.c_str());
+                expect(cfg.proxyOther, proxy.c_str());
+                expect(cfg.midCloseDelay.count() == 100, update.c_str());
+                parsed = true;
+                break;
+            }
+            auto parsedWhat = std::string{"shipped edgy-"} + spec.label + ".example.cfg parses";
+            expect(parsed, parsedWhat.c_str());
+        }
     }
 
     {
@@ -560,6 +760,52 @@ main()
         leave["value"] = "1";
         rewriteNativeJsonIn(leave, NetworkKind::xrpl);
         expect(leave["currency"].asString() == "XAH", "xrpl mode leaves XAH as issued");
+
+        json::Value mixed{json::ValueType::Object};
+        json::Value& alts = (mixed["alternatives"] = json::ValueType::Array);
+        json::Value& alt0 = alts.append(json::ValueType::Object);
+        json::Value srcAmt{json::ValueType::Object};
+        srcAmt["currency"] = "XRP";
+        srcAmt["value"] = "1";
+        alt0["source_amount"] = srcAmt;
+        rewriteNativeJsonOut(mixed, NetworkKind::xahau);
+        expect(mixed["alternatives"][0u]["source_amount"]["currency"].asString() == "XAH",
+               "nested alternatives native XRP becomes XAH");
+
+        json::Value lower{json::ValueType::Object};
+        lower["currency"] = "xah";
+        lower["value"] = "2";
+        rewriteNativeJsonIn(lower, NetworkKind::xahau);
+        expect(lower.isString() && lower.asString() == "2000000", "lowercase xah rewrites inbound");
+    }
+
+    {
+        json::Value node{json::ValueType::Object};
+        json::Value& fields = (node["NewFields"] = json::ValueType::Object);
+        fields["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        json::Value hook{json::ValueType::Object};
+        hook["HookHash"] = "00";
+        fields["Hook"] = hook;
+        json::Value amt{json::ValueType::Object};
+        amt["currency"] = "USD";
+        amt["issuer"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        amt["value"] = "1";
+        fields["TakerPays"] = amt;
+        fields["RewardAccumulator"] = "1";
+        slimJsonMetaNode(node);
+        expect(!node["NewFields"].isMember("RewardAccumulator"),
+               "slim drops unknown JSON keys");
+        expect(!node["NewFields"].isMember("Hook"), "slim drops nested non-amount objects");
+        expect(node["NewFields"].isMember("TakerPays") &&
+                   node["NewFields"]["TakerPays"].isMember("currency"),
+               "slim keeps amount JSON leaves");
+        expect(node["NewFields"].isMember("Account"), "slim keeps known fields");
+    }
+
+    {
+        expect(sleFromBinary("zz", "00") == nullptr, "sleFromBinary rejects bad hex");
+        xrpl::uint256 key{};
+        expect(sleFromBlob(xrpl::Blob{}, key) == nullptr, "sleFromBlob rejects empty blob");
     }
 
     {
@@ -742,6 +988,12 @@ main()
         books.removeFromSle(makeDir(800));
         expect(!books.hasBook(usd, xrp), "removeFromSle drops the book");
         expect(books.tipQuality(usd, xrp) == LocalOrderBooks::kNoQuality, "removed book has no tip");
+        expect(books.bookCount() == 0, "bookCount is zero after remove");
+        books.addFromSle(makeDir(500));
+        expect(books.bookCount() == 1, "bookCount is one after add");
+        books.clear();
+        expect(books.bookCount() == 0, "clear drops every book");
+        expect(books.neighbors(usd).empty(), "neighbors of unknown asset are empty");
     }
 
     {
@@ -768,6 +1020,11 @@ main()
         expect(SearchBudget::depthFor(false, 0, 0ms, 4, 4) == 4, "configured full WS starts full");
         expect(SearchBudget::depthFor(false, 0, 0ms, 0, 4) == 0, "search-fast 0 starts shallow");
         expect(SearchBudget::depthFor(false, 0, 50s, 0, 2) == 2, "search caps the climb");
+        expect(SearchBudget::forDepth(-3).maxHops >= 1, "negative depth still has at least one hop");
+        expect(SearchBudget::forDepth(99).maxHops == SearchBudget::kMaxPathLength,
+               "oversize depth clamps to 8 hops");
+        expect(SearchBudget::depthFor(false, 0, 0ms, 3, 1) == 1,
+               "search-fast above search uses the search cap");
     }
 
     {
@@ -797,6 +1054,85 @@ main()
         auto [ok2, st2] = session.doCreate(cache, bad);
         expect(!ok2, "malformed source rejected");
         expect(st2.isMember(xrpl::jss::error), "malformed source has error");
+
+        json::Value noDst{json::ValueType::Object};
+        noDst[xrpl::jss::source_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        noDst[xrpl::jss::destination_amount] = "1000000";
+        auto [ok3, st3] = session.doCreate(cache, noDst);
+        expect(!ok3 && st3.isMember(xrpl::jss::error), "missing destination_account is invalid");
+
+        json::Value noAmt{json::ValueType::Object};
+        noAmt[xrpl::jss::source_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        noAmt[xrpl::jss::destination_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        auto [ok4, st4] = session.doCreate(cache, noAmt);
+        expect(!ok4 && st4.isMember(xrpl::jss::error), "missing destination_amount is invalid");
+
+        json::Value zeroAmt{json::ValueType::Object};
+        zeroAmt[xrpl::jss::source_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        zeroAmt[xrpl::jss::destination_account] = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
+        zeroAmt[xrpl::jss::destination_amount] = "0";
+        auto [ok5, st5] = session.doCreate(cache, zeroAmt);
+        expect(!ok5 && st5.isMember(xrpl::jss::error), "zero destination_amount is invalid");
+
+        json::Value emptySrc{json::ValueType::Object};
+        emptySrc[xrpl::jss::source_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        emptySrc[xrpl::jss::destination_account] = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
+        emptySrc[xrpl::jss::destination_amount] = "1000000";
+        emptySrc[xrpl::jss::source_currencies] = json::ValueType::Array;
+        auto [ok6, st6] = session.doCreate(cache, emptySrc);
+        expect(!ok6 && st6.isMember(xrpl::jss::error), "empty source_currencies is invalid");
+
+        json::Value tooMany{json::ValueType::Object};
+        tooMany[xrpl::jss::source_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        tooMany[xrpl::jss::destination_account] = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
+        tooMany[xrpl::jss::destination_amount] = "1000000";
+        json::Value& curs = (tooMany[xrpl::jss::source_currencies] = json::ValueType::Array);
+        for (int i = 0; i < xrpl::rpc::tuning::kMaxSrcCur + 1; ++i)
+        {
+            json::Value c{json::ValueType::Object};
+            c[xrpl::jss::currency] = "USD";
+            curs.append(c);
+        }
+        auto [ok7, st7] = session.doCreate(cache, tooMany);
+        expect(!ok7 && st7.isMember(xrpl::jss::error), "too many source_currencies is invalid");
+
+        json::Value sendMaxBad{json::ValueType::Object};
+        sendMaxBad[xrpl::jss::source_account] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        sendMaxBad[xrpl::jss::destination_account] = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
+        sendMaxBad[xrpl::jss::destination_amount] = "1000000";
+        sendMaxBad[xrpl::jss::send_max] = "1000000";
+        auto [ok8, st8] = session.doCreate(cache, sendMaxBad);
+        expect(!ok8 && st8.isMember(xrpl::jss::error), "send_max without convert-all is invalid");
+    }
+
+    {
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        xrpl::STAmount const dstAmt{xrpl::xrpIssue(), 1'000'000};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            xrpl::xrpIssue(),
+            dstAmt,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(0),
+            {});
+        expect(found.paths.empty(), "empty book graph yields no paths");
+        expect(found.candidates == 0, "empty book graph has no candidates");
+        expect(found.depth == 0, "empty search reports the requested depth");
     }
 
     {
@@ -847,6 +1183,17 @@ main()
         expect(info.isMember("uptime"), "path_counts uptime");
         expect(info["sessions"].asDouble() == 0, "path_counts sessions start at 0");
         expect(info["searches"].asDouble() == 0, "path_counts searches start at 0");
+        expect(info.isMember("network") && info["network"].asString() == "xrpl",
+               "path_counts network is xrpl on xrpld binary");
+        expect(info.isMember("native_currency") && info["native_currency"].asString() == "XRP",
+               "path_counts native_currency is XRP on xrpld binary");
+        expect(info.isMember("node") && info["node"].asString() == "xrpld",
+               "path_counts node is xrpld on xrpld binary");
+        auto status = engine.statusJson();
+        expect(status.isMember("network") && status["network"].asString() == "xrpl",
+               "path_info network is xrpl on xrpld binary");
+        expect(!engine.ready(), "engine is not ready without a snapshot");
+        expect(engine.ledger() == nullptr, "engine has no ledger before snapshot");
     }
 
     if (gFails != 0)

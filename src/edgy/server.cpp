@@ -1,8 +1,11 @@
 #include <edgy/server.hpp>
+
+#include <edgy/compat.hpp>
 #include <edgy/version.hpp>
 
 #include <xrpl/json/json_reader.h>
 #include <xrpl/json/to_string.h>
+#include <xrpl/protocol/ErrorCodes.h>
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/jss.h>
 
@@ -56,7 +59,7 @@ json::Value
 wrapResponse(json::Value result, json::Value const& id)
 {
     bool const err = result.isMember(xrpl::jss::error);
-    json::Value out{json::ValueType::Object};
+    json::Value out{edgy::kJsonObject};
     if (!id.isNull())
         out[xrpl::jss::id] = id;
     out[xrpl::jss::status] = err ? "error" : "success";
@@ -185,7 +188,7 @@ public:
         if (cmd == "path_info")
         {
             auto s = engine_.statusJson();
-            json::Value info{json::ValueType::Object};
+            json::Value info{edgy::kJsonObject};
             info["info"] = s;
             info["info"]["server_state"] = engine_.ready() ? "full" : "syncing";
             info["info"]["build_version"] = edgy::versionString();
@@ -201,7 +204,7 @@ public:
         }
         if (cmd == "ping")
         {
-            done(json::Value{json::ValueType::Object});
+            done(json::Value{edgy::kJsonObject});
             return;
         }
         if (cmd == "subscribe" || cmd == "unsubscribe")
@@ -224,7 +227,7 @@ public:
                 else
                     ledgerSubs_.erase(connId);
             }
-            json::Value ack{json::ValueType::Object};
+            json::Value ack{edgy::kJsonObject};
             done(ack);
             if (cmd == "subscribe" && ledger && push)
                 push(engine_.ledgerClosedJson());
@@ -233,7 +236,7 @@ public:
         if (cmd == "ledger_closed")
         {
             auto s = engine_.statusJson();
-            json::Value r{json::ValueType::Object};
+            json::Value r{edgy::kJsonObject};
             if (s.isMember(xrpl::jss::ledger_index))
                 r[xrpl::jss::ledger_index] = s[xrpl::jss::ledger_index];
             if (s.isMember(xrpl::jss::ledger_hash))
