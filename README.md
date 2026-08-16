@@ -33,32 +33,30 @@ Open subscriptions are **repriced every 100ms**. Ledger close also reprices. At 
 
 Binaries and notes: [github.com/shortthefomo/edgy/releases](https://github.com/shortthefomo/edgy/releases). Latest: [releases/latest](https://github.com/shortthefomo/edgy/releases/latest).
 
-Assets are named `edgy-<version>-<os>-<arch>` (for example `edgy-0.1.3-darwin-arm64` on macOS Apple Silicon). Other platforms should [build from source](BUILD.md) until a matching asset is attached.
+Assets are named `edgy-<version>-<os>-<arch>` (for example `edgy-0.1.4-darwin-arm64` on macOS Apple Silicon). Other platforms should [build from source](BUILD.md) until a matching asset is attached.
 
 ```bash
 # pick the asset name from the latest release page
-VER=0.1.3
+VER=0.1.4
 curl -L -o edgy \
   "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-${VER}-darwin-arm64"
 chmod +x edgy
 ./edgy --version
-# edgy 0.1.3+<git>
+# edgy 0.1.4+<git>
 ```
 
 Grab a starter config from the same tag (or copy `cfg/edgy.example.cfg` from a clone):
 
 ```bash
 curl -L -o edgy.cfg \
-  https://raw.githubusercontent.com/shortthefomo/edgy/v0.1.3/cfg/edgy.example.cfg
+  https://raw.githubusercontent.com/shortthefomo/edgy/v0.1.4/cfg/edgy.example.cfg
 ```
 
-Edit `[node]` to your node’s WebSocket. Then:
+Edit `[node]` to your node’s WebSocket. For Xahau set `[network] xahau` or pass `--xahau`. Then:
 
 ```bash
 ./edgy --conf edgy.cfg
 ```
-
-Xahau (`[network] xahau` / `--xahau`) is on this tree. Use a binary built from `xahaud-support` or later, or [build from source](BUILD.md), until a release newer than `0.1.3` is published.
 
 A full XRPL mainnet snapshot is ~19 million objects and needs tens of gigabytes of RAM. Xahau is smaller. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
 
