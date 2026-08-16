@@ -10,6 +10,7 @@
 #include <xrpl/basics/StringUtilities.h>
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/json/json_value.h>
+#include <xrpl/json/to_string.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/RPCErr.h>
@@ -23,6 +24,7 @@
 #include <xrpl/protocol/jss.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -185,6 +187,47 @@ applyJsonAffectedNodes(
         }
     };
 
+    auto jsonLedgerIndex = [](json::Value const& node, xrpl::uint256& key) {
+        if (!node.isMember("LedgerIndex") || !node["LedgerIndex"].isString())
+            return false;
+        return key.parseHex(node["LedgerIndex"].asString());
+    };
+
+    auto jsonTypeKnown = [](json::Value const& node) {
+        if (!node.isMember("LedgerEntryType"))
+            return false;
+        auto const& t = node["LedgerEntryType"];
+        if (t.isString())
+        {
+            try
+            {
+                (void)xrpl::LedgerFormats::getInstance().findTypeByName(t.asString());
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+        if (t.isIntegral())
+        {
+            auto const type = static_cast<xrpl::LedgerEntryType>(t.asUInt());
+            return xrpl::LedgerFormats::getInstance().findByType(type) != nullptr;
+        }
+        return false;
+    };
+
+    auto logParseFail = [](json::Value const& node, json::Value const& err) {
+        static std::atomic<int> n{0};
+        if (n.fetch_add(1) >= 8)
+            return;
+        std::string type = "?";
+        if (node.isMember("LedgerEntryType") && node["LedgerEntryType"].isString())
+            type = node["LedgerEntryType"].asString();
+        std::cerr << "apply JSON parse_fail type=" << type << " "
+                  << json::to_string(err) << '\n';
+    };
+
     for (unsigned i = 0; i < nodes->size(); ++i)
     {
         auto const& item = (*nodes)[i];
@@ -204,11 +247,41 @@ applyJsonAffectedNodes(
             if (!item.isMember(kind.name) || !item[kind.name].isObject())
                 continue;
             json::Value node = item[kind.name];
-            stripUnknownJsonFields(node);
+            bool const deleted = kind.field == &xrpl::sfDeletedNode;
+            bool const known = jsonTypeKnown(node);
+
+            // xahaud Hook / URIToken / HookState etc. are not in libxrpl.
+            // Still erase by index so the overlay stays honest.
+            if (!known)
+            {
+                if (deleted)
+                {
+                    xrpl::uint256 key;
+                    if (jsonLedgerIndex(node, key))
+                    {
+                        if (auto cur = builder.clone(key))
+                            books.removeFromSle(cur);
+                        builder.erase(key);
+                        ++stats.deleted;
+                    }
+                    else
+                    {
+                        ++stats.skippedUnknown;
+                    }
+                }
+                else
+                {
+                    ++stats.skippedUnknown;
+                }
+                continue;
+            }
+
+            slimJsonMetaNode(node);
             xrpl::STParsedJSONObject parsed(kind.name, node);
             if (!parsed.object)
             {
                 ++stats.parseFail;
+                logParseFail(node, parsed.error);
                 continue;
             }
             // parseObject uses sfGeneric; applyMetaNode keys off the node name.
@@ -936,6 +1009,7 @@ Engine::resetApplyStats()
     applyTxs_ = 0;
     applyNoMeta_ = 0;
     applyParseFail_ = 0;
+    applySkipped_ = 0;
     // prevCloseTxs_ is the last ledgerClosed txn_count; not cleared here.
     applyCreated_ = 0;
     applyDeleted_ = 0;
@@ -973,6 +1047,8 @@ Engine::logSync(char const* what, xrpl::LedgerHeader const& header, json::Value 
         std::cerr << " no_meta=" << applyNoMeta_;
     if (applyParseFail_ != 0)
         std::cerr << " parse_fail=" << applyParseFail_;
+    if (applySkipped_ != 0)
+        std::cerr << " skipped=" << applySkipped_;
     std::cerr << " created=" << applyCreated_ << " deleted=" << applyDeleted_
               << " modified=" << applyModified_;
     if (applyIncomplete_ != 0)
@@ -1121,6 +1197,7 @@ Engine::applyTransaction(json::Value const& msg)
             applyDeleted_ += stats.deleted;
             applyIncomplete_ += stats.incomplete;
             applyParseFail_ += stats.parseFail;
+            applySkipped_ += stats.skippedUnknown;
             any = stats.applied() != 0;
         }
         else

@@ -26,6 +26,11 @@ sleFromBinary(std::string const& dataHex, std::string const& indexHex);
 void
 stripUnknownJsonFields(json::Value& v);
 
+// After strip: drop nested STObjects that are not amount/issue JSON so
+// STParsedJSON can apply AccountRoot / Offer / RippleState from xahaud.
+void
+slimJsonMetaNode(json::Value& node);
+
 // Map native ticker XAH <-> XRP around libxrpl (which only speaks XRP).
 void
 rewriteNativeJsonIn(json::Value& v, NetworkKind network);

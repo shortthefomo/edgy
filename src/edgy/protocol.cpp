@@ -492,6 +492,24 @@ stripUnknownJsonFields(json::Value& v)
 }
 
 void
+slimJsonMetaNode(json::Value& node)
+{
+    stripUnknownJsonFields(node);
+    for (char const* inner : {"NewFields", "FinalFields", "PreviousFields"})
+    {
+        if (!node.isMember(inner) || !node[inner].isObject())
+            continue;
+        auto const names = node[inner].getMemberNames();
+        for (auto const& name : names)
+        {
+            auto const& val = node[inner][name];
+            if (val.isObject() && !isJsonAssetLeaf(val))
+                node[inner].removeMember(name);
+        }
+    }
+}
+
+void
 rewriteNativeJsonIn(json::Value& v, NetworkKind network)
 {
     rewriteNativeWalk(v, true, network == NetworkKind::xahau);

@@ -219,6 +219,32 @@ main()
     }
 
     {
+        // xahaud Hook / URIToken types are unknown to rippled libxrpl.
+        LedgerBuilder b;
+        LocalOrderBooks books;
+        xrpl::uint256 hookKey;
+        (void)hookKey.parseHex(
+            "00480000000000000000000000000000000000000000000000000000000000CC");
+        b.upsertRaw(hookKey, xrpl::Blob{0x01, 0x02, 0x03});
+        json::Value meta{json::ValueType::Object};
+        json::Value& nodes = (meta["AffectedNodes"] = json::ValueType::Array);
+        json::Value& createdWrap = nodes.append(json::ValueType::Object);
+        json::Value& created = (createdWrap["CreatedNode"] = json::ValueType::Object);
+        created["LedgerEntryType"] = "Hook";
+        created["LedgerIndex"] =
+            "00480000000000000000000000000000000000000000000000000000000000DD";
+        json::Value& delWrap = nodes.append(json::ValueType::Object);
+        json::Value& deleted = (delWrap["DeletedNode"] = json::ValueType::Object);
+        deleted["LedgerEntryType"] = "HookState";
+        deleted["LedgerIndex"] = to_string(hookKey);
+        auto const stats = applyJsonAffectedNodes(b, books, meta);
+        expect(stats.parseFail == 0, "unknown xahaud types are not parse_fail");
+        expect(stats.skippedUnknown == 1, "Hook create is skipped");
+        expect(stats.deleted == 1, "unknown-type DeletedNode still erases by index");
+        expect(!b.contains(hookKey), "HookState delete removes the blob");
+    }
+
+    {
         auto const path = std::string{"/tmp/edgy-test.cfg"};
         {
             std::ofstream out(path);

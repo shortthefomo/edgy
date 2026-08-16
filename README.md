@@ -149,7 +149,9 @@ ws://127.0.0.1:6006
 xahau
 ```
 
-`--xahau` / `--network xahau` and `EDGY_NETWORK=xahau` do the same. Public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks. Unknown xahaud ledger types (Hooks, URITokens) are stored as blobs and skipped for path finding.
+`--xahau` / `--network xahau` and `EDGY_NETWORK=xahau` do the same. Public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks.
+
+Edgy always links rippled’s `libxrpl` (xahaud’s library is `namespace ripple` and a different API — it cannot be swapped in with a config flag, and both cannot live in one binary). Hook / URIToken / HookState objects are kept as blobs or skipped on apply; Offers, lines, accounts, and directories still update. Deletes of unknown types still erase by `LedgerIndex`.
 
 Startup connects to `[node]` and requires `server_info.info.server_state` to be `full`, `proposing`, or `unknown`. Anything else (`syncing`, `connected`, …) exits immediately with a fatal error — it will not listen or snapshot.
 
