@@ -53,6 +53,37 @@ planApplyCycle(bool stop, bool ready, bool queueEmpty) noexcept
     };
 }
 
+// xrpld publishes ledgerClosed for N, then the validated txs for N.
+// Skip only older ledgers — seq == currentSeq must still apply.
+[[nodiscard]] inline bool
+shouldApplyStreamTx(std::uint32_t txSeq, std::uint32_t currentSeq) noexcept
+{
+    return txSeq == 0 || txSeq >= currentSeq;
+}
+
+// Apply stream JSON meta (AffectedNodes). Used by the live apply path and tests.
+struct StreamMetaStats
+{
+    std::uint32_t created{0};
+    std::uint32_t modified{0};
+    std::uint32_t deleted{0};
+    std::uint32_t incomplete{0};
+    std::uint32_t none{0};
+    std::uint32_t parseFail{0};
+
+    [[nodiscard]] std::uint32_t
+    applied() const
+    {
+        return created + modified + deleted + incomplete;
+    }
+};
+
+StreamMetaStats
+applyJsonAffectedNodes(
+    LedgerBuilder& builder,
+    LocalOrderBooks& books,
+    json::Value const& meta);
+
 class Engine
 {
 public:
@@ -207,6 +238,7 @@ private:
     // Apply-thread only. Reset after each closed ledger / snapshot.
     std::uint64_t applyTxs_{0};
     std::uint64_t applyNoMeta_{0};
+    std::uint32_t prevCloseTxs_{0};
     std::uint64_t applyCreated_{0};
     std::uint64_t applyDeleted_{0};
     std::uint64_t applyModified_{0};
