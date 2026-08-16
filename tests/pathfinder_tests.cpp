@@ -15,10 +15,12 @@
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
+#include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/Serializer.h>
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STAmount.h>
+#include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/jss.h>
 
@@ -197,9 +199,7 @@ main()
 
     {
         char const* shipped[] = {
-            "pathfinder.cfg",
             "cfg/pathfinder.example.cfg",
-            "/Users/fomo/Dev/Ledgers/PathFinder/pathfinder.cfg",
             "/Users/fomo/Dev/Ledgers/PathFinder/cfg/pathfinder.example.cfg",
         };
         bool parsed = false;
@@ -211,7 +211,9 @@ main()
             auto const cfg = Config::fromFile(p);
             expect(cfg.listenWs == "0.0.0.0:6008", "shipped [listen-ws]");
             expect(cfg.nodeWs == "ws://127.0.0.1:6006", "shipped [node]");
-            expect(cfg.debugLog == "/private/tmp/pathfinder.log", "shipped [debug]");
+            expect(cfg.debugLog == "/tmp/pathfinder.log" ||
+                       cfg.debugLog == "/private/tmp/pathfinder.log",
+                   "shipped [debug]");
             expect(cfg.search == Config::kSearchFull, "shipped [search] full");
             expect(cfg.searchFast == Config::kSearchFull, "shipped [search-fast] full");
             expect(cfg.fullSnapshot, "shipped [full-snapshot] full");
@@ -289,6 +291,43 @@ main()
     }
 
     {
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 9;
+        b.setHeader(h);
+        expect(!b.publish()->open(), "published ledger is closed by default");
+        b.setOpen(true);
+        auto openView = b.publish();
+        expect(openView->open(), "setOpen(true) is visible on publish");
+        b.setOpen(false);
+        auto closedView = b.publish();
+        expect(!closedView->open(), "setOpen(false) is visible on publish");
+        expect(openView->open(), "prior published view keeps its open flag");
+    }
+
+    {
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 11;
+        b.setHeader(h);
+        b.setOpen(true);
+        auto openView = b.publish();
+        auto cache = std::make_shared<xrpl::AssetCache>(openView, services.getJournal("test"));
+        expect(cache->getLedger()->open(), "cache starts on the open view");
+        b.setOpen(false);
+        auto closedView = b.publish();
+        cache->advanceLedger(closedView);
+        expect(!cache->getLedger()->open(), "same-seq open->closed swaps the view");
+        expect(cache->getLedger()->seq() == 11, "same-seq swap keeps the sequence");
+        b.setOpen(true);
+        auto openAgain = b.publish();
+        cache->advanceLedger(openAgain);
+        expect(cache->getLedger()->open(), "same-seq closed->open still swaps the view");
+    }
+
+    {
         LocalOrderBooks books;
         xrpl::Issue xrp = xrpl::xrpIssue();
         auto const gw = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
@@ -310,6 +349,35 @@ main()
         expect(sawXrp, "2-hop intersection includes XRP");
         auto usdOut = books.neighbors(usd);
         expect(!usdOut.empty(), "usd has neighbors");
+    }
+
+    {
+        LocalOrderBooks books;
+        auto const gw = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue xrp = xrpl::xrpIssue();
+        xrpl::uint256 key;
+        (void)key.parseHex("02000000000000000000000000000000000000000000000000000000000000AA");
+        auto makeDir = [&](std::uint64_t rate) {
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            sle->setFieldU64(xrpl::sfExchangeRate, rate);
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, usd.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, usd.account);
+            sle->setFieldH160(xrpl::sfTakerGetsCurrency, xrp.currency);
+            sle->setFieldH160(xrpl::sfTakerGetsIssuer, xrp.account);
+            return sle;
+        };
+        books.addFromSle(makeDir(500));
+        expect(books.hasBook(usd, xrp), "book-dir SLE adds the book");
+        expect(books.tipQuality(usd, xrp) == 500, "tip quality is the exchange rate");
+        books.addFromSle(makeDir(100));
+        expect(books.tipQuality(usd, xrp) == 100, "tip quality replaces on a better rate");
+        books.addFromSle(makeDir(800));
+        expect(books.tipQuality(usd, xrp) == 800, "tip quality replaces even when worse");
+        books.removeFromSle(makeDir(800));
+        expect(!books.hasBook(usd, xrp), "removeFromSle drops the book");
+        expect(books.tipQuality(usd, xrp) == LocalOrderBooks::kNoQuality, "removed book has no tip");
     }
 
     {

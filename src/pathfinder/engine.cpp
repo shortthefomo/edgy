@@ -63,6 +63,19 @@ offerComplete(xrpl::SLE const& sle)
          sle.getFieldAmount(xrpl::sfTakerGets).signum() != 0);
 }
 
+xrpl::SLE::pointer
+sleFromMetaNode(xrpl::STObject const& node, xrpl::STObject const& inner, xrpl::uint256 const& key)
+{
+    xrpl::STObject fields{inner};
+    if (!fields.isFieldPresent(xrpl::sfLedgerEntryType) &&
+        node.isFieldPresent(xrpl::sfLedgerEntryType))
+    {
+        fields.setFieldU16(
+            xrpl::sfLedgerEntryType, node.getFieldU16(xrpl::sfLedgerEntryType));
+    }
+    return std::make_shared<xrpl::SLE>(fields, key);
+}
+
 bool
 applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject const& node)
 {
@@ -83,23 +96,58 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
         auto const key = node.getFieldH256(xrpl::sfLedgerIndex);
         if (deleted)
         {
+            if (node.isFieldPresent(xrpl::sfFinalFields))
+            {
+                auto const& inner =
+                    dynamic_cast<xrpl::STObject const&>(node.peekAtField(xrpl::sfFinalFields));
+                books.removeFromSle(sleFromMetaNode(node, inner, key));
+            }
             builder.erase(key);
             return true;
         }
         if (!innerField || !node.isFieldPresent(*innerField))
             return false;
         auto const& inner = dynamic_cast<xrpl::STObject const&>(node.peekAtField(*innerField));
-        auto sle = std::make_shared<xrpl::SLE>(inner, key);
+        auto sle = sleFromMetaNode(node, inner, key);
         if (!offerComplete(*sle))
-            return false;
+        {
+            books.removeFromSle(sle);
+            builder.erase(key);
+            return true;
+        }
         books.addFromSle(sle);
         builder.upsert(std::move(sle));
         return true;
     }
-    catch (...)
+    catch (std::exception const& ex)
     {
+        std::cerr << "applyMetaNode: " << ex.what() << '\n';
         return false;
     }
+}
+
+std::uint32_t
+msgLedgerIndex(json::Value const& msg)
+{
+    auto const take = [](json::Value const& v) -> std::uint32_t {
+        if (v.isIntegral())
+            return v.asUInt();
+        if (v.isString())
+        {
+            try
+            {
+                return static_cast<std::uint32_t>(std::stoul(v.asString()));
+            }
+            catch (...)
+            {
+                return 0;
+            }
+        }
+        return 0;
+    };
+    if (msg.isMember(xrpl::jss::ledger_index))
+        return take(msg[xrpl::jss::ledger_index]);
+    return 0;
 }
 
 void
@@ -149,6 +197,12 @@ Engine::start()
 {
     node_->onLedger([this](json::Value const& msg) { enqueueApply(true, msg); });
     node_->onTransaction([this](json::Value const& msg) { enqueueApply(false, msg); });
+    node_->onDisconnect([this](std::string const& why) {
+        std::cerr << "upstream disconnected: " << why << '\n';
+        ready_.store(false);
+        needResync_.store(true);
+        applyCv_.notify_all();
+    });
     applyThread_ = std::thread([this] { applyLoop(); });
     syncThread_ = std::thread([this] { syncLoop(); });
 }
@@ -157,6 +211,8 @@ void
 Engine::stop()
 {
     stop_.store(true);
+    if (pool_)
+        pool_->shutdown();
     services_.stop();
     applyCv_.notify_all();
     if (syncThread_.joinable())
@@ -372,10 +428,46 @@ Engine::enqueueApply(bool ledgerClosed, json::Value msg)
     {
         std::lock_guard lock(applyMutex_);
         if (applyQueue_.size() > 20'000)
+        {
+            while (!applyQueue_.empty())
+                applyQueue_.pop();
+            ready_.store(false);
+            needResync_.store(true);
+            std::cerr << "apply queue overflow; will resnapshot\n";
+            applyCv_.notify_all();
             return;
+        }
         applyQueue_.push(ApplyItem{ledgerClosed, std::move(msg)});
     }
     applyCv_.notify_one();
+}
+
+void
+Engine::waitApplyIdle()
+{
+    std::unique_lock lock(applyMutex_);
+    applyCv_.notify_all();
+    applyCv_.wait(lock, [this] { return stop_.load() || applyIdle_.load(); });
+}
+
+void
+Engine::forgetConnSessions(int connId, std::shared_ptr<xrpl::AssetCache> const& cache)
+{
+    auto range = connToSession_.equal_range(connId);
+    for (auto it = range.first; it != range.second; ++it)
+    {
+        auto sit = subs_.find(it->second);
+        if (sit == subs_.end())
+            continue;
+        sit->second.session->doClose();
+        if (cache)
+        {
+            cache->releaseSession(sit->second.session->id());
+            cache->forgetSession(sit->second.session->id());
+        }
+        subs_.erase(sit);
+    }
+    connToSession_.erase(connId);
 }
 
 void
@@ -387,11 +479,16 @@ Engine::applyLoop()
         std::vector<ApplyItem> batch;
         {
             std::unique_lock lock(applyMutex_);
+            applyIdle_.store(true);
+            applyCv_.notify_all();
             applyCv_.wait_for(lock, cfg_.midCloseDelay, [this] {
-                return stop_.load() || !applyQueue_.empty();
+                return stop_.load() || (ready_.load() && !applyQueue_.empty());
             });
             if (stop_.load() && applyQueue_.empty())
                 return;
+            if (!ready_.load() || applyQueue_.empty())
+                continue;
+            applyIdle_.store(false);
             while (!applyQueue_.empty())
             {
                 batch.push_back(std::move(applyQueue_.front()));
@@ -416,7 +513,7 @@ Engine::applyLoop()
         }
 
         auto const now = std::chrono::steady_clock::now();
-        if (ready_.load() && now - lastTick_ >= cfg_.midCloseDelay)
+        if (!stop_.load() && ready_.load() && now - lastTick_ >= cfg_.midCloseDelay)
         {
             lastTick_ = now;
             try
@@ -435,11 +532,7 @@ void
 Engine::syncLoop()
 {
     auto j = services_.getJournal("Engine");
-    while (!stop_.load() && !node_->connected())
-        std::this_thread::sleep_for(std::chrono::milliseconds{50});
-    if (stop_.load())
-        return;
-
+    bool subscribed = false;
     while (!stop_.load())
     {
         try
@@ -448,35 +541,83 @@ Engine::syncLoop()
                 std::this_thread::sleep_for(std::chrono::milliseconds{50});
             if (stop_.load())
                 return;
+
+            waitApplyIdle();
+            if (stop_.load())
+                return;
+
             std::cerr << "loading " << (cfg_.fullSnapshot ? "full" : "books")
                       << " ledger snapshot from " << cfg_.nodeWs << '\n';
             JLOG(j.info()) << "loading ledger snapshot from " << cfg_.nodeWs;
             loadSnapshot();
-            json::Value sub{json::ValueType::Object};
-            sub[xrpl::jss::streams] = json::Value{json::ValueType::Array};
-            sub[xrpl::jss::streams].append("ledger");
-            sub[xrpl::jss::streams].append("transactions");
-            sub[xrpl::jss::binary] = true;
-            (void)node_->request("subscribe", sub, std::chrono::seconds{15});
-            if (auto view = ledger())
+            if (!subscribed)
+            {
+                json::Value sub{json::ValueType::Object};
+                sub[xrpl::jss::streams] = json::Value{json::ValueType::Array};
+                sub[xrpl::jss::streams].append("ledger");
+                sub[xrpl::jss::streams].append("transactions");
+                sub[xrpl::jss::binary] = true;
+                (void)node_->request("subscribe", sub, std::chrono::seconds{15});
+                subscribed = true;
+            }
+            if (auto view = ledger(); view && firstSeq_.load() == 0)
                 firstSeq_.store(view->seq());
+            needResync_.store(false);
             ready_.store(true);
+            applyCv_.notify_all();
             std::cerr << "snapshot ready (" << objects_.load()
                       << " objects); serving local path_find\n";
             JLOG(j.info()) << "snapshot ready; serving local path_find";
+
             while (!stop_.load())
-                std::this_thread::sleep_for(std::chrono::seconds{1});
-            return;
+            {
+                {
+                    std::unique_lock lock(applyMutex_);
+                    applyCv_.wait_for(lock, std::chrono::seconds{1}, [this] {
+                        return stop_.load() || needResync_.load() || !node_->connected();
+                    });
+                }
+                if (stop_.load())
+                    return;
+                if (needResync_.load() || !node_->connected())
+                {
+                    ready_.store(false);
+                    applyCv_.notify_all();
+                    if (!node_->connected())
+                    {
+                        subscribed = false;
+                        needResync_.store(true);
+                    }
+                    break;
+                }
+            }
+            if (stop_.load())
+                return;
+            if (!node_->connected())
+            {
+                std::cerr << "upstream down; reconnecting for resnapshot\n";
+                node_->stop();
+                std::this_thread::sleep_for(std::chrono::milliseconds{200});
+                if (!stop_.load())
+                    node_->run();
+            }
         }
         catch (std::exception const& ex)
         {
             ready_.store(false);
+            subscribed = false;
+            applyCv_.notify_all();
+            if (stop_.load())
+                return;
             std::cerr << "snapshot failed: " << ex.what() << " (retry in 3s)\n";
             JLOG(j.error()) << "snapshot failed: " << ex.what();
             std::this_thread::sleep_for(std::chrono::seconds{3});
+            if (stop_.load())
+                return;
             node_->stop();
             std::this_thread::sleep_for(std::chrono::milliseconds{200});
-            node_->run();
+            if (!stop_.load())
+                node_->run();
         }
     }
 }
@@ -484,6 +625,12 @@ Engine::syncLoop()
 void
 Engine::loadSnapshot()
 {
+    services_.books().clear();
+    {
+        std::lock_guard lock(stateMutex_);
+        cache_.reset();
+        published_.reset();
+    }
     builder_.clear();
     builder_.reserve(25'000'000);
     json::Value ledgerReq{json::ValueType::Object};
@@ -496,11 +643,12 @@ Engine::loadSnapshot()
     if (ledgerRes.isMember(xrpl::jss::ledger))
         fillHeaderFromLedgerJson(header, ledgerRes[xrpl::jss::ledger]);
     builder_.setHeader(header);
-    firstSeq_.store(header.seq);
+    if (firstSeq_.load() == 0)
+        firstSeq_.store(header.seq);
     currentSeq_.store(header.seq);
     std::cerr << "snapshot ledger " << header.seq << " " << to_string(header.hash) << '\n';
 
-    auto loadType = [&](std::optional<std::string> type) {
+    auto loadType = [&](std::optional<std::string> type, bool optionalType = false) {
         json::Value marker;
         std::uint64_t loaded = 0;
         int page = 0;
@@ -527,12 +675,12 @@ Engine::loadSnapshot()
             if (res.isMember(xrpl::jss::error))
             {
                 auto const err = res[xrpl::jss::error].asString();
-                if (type)
+                if (optionalType)
                 {
                     std::cerr << "  snapshot " << label << " skipped: " << err << '\n';
                     return;
                 }
-                throw std::runtime_error("ledger_data: " + err);
+                throw std::runtime_error("ledger_data " + label + ": " + err);
             }
             int batch = 0;
             if (res.isMember("state") && res["state"].isArray())
@@ -586,6 +734,10 @@ Engine::loadSnapshot()
         // Path-relevant types only: books, AMMs, directories, accounts, lines.
         for (char const* type : {"offer", "amm", "directory", "account", "state"})
             loadType(std::string{type});
+        // Fees/amendments are required for RippleCalc even on a books snapshot.
+        // Some public hubs reject these type filters; those are best-effort.
+        loadType(std::string{"fee"}, true);
+        loadType(std::string{"amendments"}, true);
     }
 
     publishBuilder(false);
@@ -596,11 +748,11 @@ Engine::publishBuilder(bool rebuildBooks)
 {
     auto view = builder_.publish();
     objects_.store(view->size());
+    std::shared_ptr<xrpl::AssetCache> cache;
+    bool created = false;
     {
         std::lock_guard lock(stateMutex_);
         published_ = view;
-        if (rebuildBooks)
-            services_.books().setup(view);
         if (!cache_)
         {
             cache_ = std::make_shared<xrpl::AssetCache>(
@@ -610,12 +762,14 @@ Engine::publishBuilder(bool rebuildBooks)
                 cfg_.maxLinesPerAccount,
                 cfg_.cacheReuseLedgers,
                 cfg_.lineChunkSize);
+            created = true;
         }
-        else
-        {
-            cache_->advanceLedger(view);
-        }
+        cache = cache_;
     }
+    if (rebuildBooks)
+        services_.books().setup(view);
+    if (cache && !created)
+        cache->advanceLedger(view);
 }
 
 void
@@ -623,9 +777,13 @@ Engine::applyLedgerClosed(json::Value const& msg)
 {
     if (!ready_.load())
         return;
+    if (auto const seq = msgLedgerIndex(msg); seq != 0 && seq <= currentSeq_.load())
+        return;
     xrpl::LedgerHeader header = builder_.header();
     fillHeaderFromLedgerJson(header, msg);
     builder_.setHeader(header);
+    builder_.setOpen(false);
+    currentSeq_.store(header.seq);
     publishBuilder(false);
     dirty_.store(false, std::memory_order_release);
     if (auto cache = cache_)
@@ -656,9 +814,12 @@ Engine::applyTransaction(json::Value const& msg)
 {
     if (!ready_.load())
         return;
+    if (auto const seq = msgLedgerIndex(msg); seq != 0 && seq <= currentSeq_.load())
+        return;
     if (msg.isMember(xrpl::jss::validated) && msg[xrpl::jss::validated].isBool() &&
         !msg[xrpl::jss::validated].asBool())
         return;
+    builder_.setOpen(true);
 
     // Binary metadata only. JSON FinalFields applies were dropping offer
     // amounts / BookDirectory and left BookTip stepping the same empty
@@ -682,8 +843,9 @@ Engine::applyTransaction(json::Value const& msg)
         if (any)
             dirty_.store(true, std::memory_order_release);
     }
-    catch (...)
+    catch (std::exception const& ex)
     {
+        std::cerr << "applyTransaction: " << ex.what() << '\n';
     }
 }
 
@@ -714,6 +876,9 @@ Engine::midCloseTick()
 void
 Engine::notifySubscriptions(bool revalidateOnly)
 {
+    if (stop_.load() || !pool_)
+        return;
+
     std::vector<Sub> live;
     {
         std::lock_guard lock(subMutex_);
@@ -745,37 +910,43 @@ Engine::notifySubscriptions(bool revalidateOnly)
             --deepenLeft;
         }
         bool const deepen = !reval;
-        pool_->submit([this, sub, cache, reval, deepen] {
-            try
-            {
-                if (!sub.session->closing())
+        try
+        {
+            pool_->submit([this, sub, cache, reval, deepen] {
+                try
                 {
-                    searches_.fetch_add(1);
-                    if (reval)
-                        revalidates_.fetch_add(1);
-                    else
-                        updates_.fetch_add(1);
-                    if (deepen)
-                        deepens_.fetch_add(1);
-                    auto const t0 = std::chrono::steady_clock::now();
-                    auto update = sub.session->doUpdate(cache, false, reval);
-                    noteSearchMs(static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count()));
-                    update[xrpl::jss::type] = "path_find";
-                    if (sub.push)
-                        sub.push(std::move(update));
+                    if (!sub.session->closing())
+                    {
+                        searches_.fetch_add(1);
+                        if (reval)
+                            revalidates_.fetch_add(1);
+                        else
+                            updates_.fetch_add(1);
+                        if (deepen)
+                            deepens_.fetch_add(1);
+                        auto const t0 = std::chrono::steady_clock::now();
+                        auto update = sub.session->doUpdate(cache, false, reval);
+                        noteSearchMs(static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count()));
+                        update[xrpl::jss::type] = "path_find";
+                        if (sub.push)
+                            sub.push(std::move(update));
+                    }
                 }
-            }
-            catch (...)
-            {
-                errors_.fetch_add(1);
+                catch (...)
+                {
+                    errors_.fetch_add(1);
+                }
                 sub.session->endUpdate();
-                throw;
-            }
+            });
+        }
+        catch (...)
+        {
+            errors_.fetch_add(1);
             sub.session->endUpdate();
-        });
+        }
     }
 }
 
@@ -840,6 +1011,7 @@ Engine::runPathFind(json::Value const& params, int connId, PushFn push)
         if (valid)
         {
             std::lock_guard lock(subMutex_);
+            forgetConnSessions(connId, cache);
             subs_[id] = Sub{session, std::move(push), connId};
             connToSession_.emplace(connId, id);
         }
@@ -863,17 +1035,9 @@ Engine::runPathFind(json::Value const& params, int connId, PushFn push)
         {
             auto sit = subs_.find(it->second);
             if (sit != subs_.end())
-            {
                 last = sit->second.session->doClose();
-                if (cache)
-                {
-                    cache->releaseSession(sit->second.session->id());
-                    cache->forgetSession(sit->second.session->id());
-                }
-                subs_.erase(sit);
-            }
         }
-        connToSession_.erase(connId);
+        forgetConnSessions(connId, cache);
         return last;
     }
     if (sub == "status")
@@ -894,19 +1058,29 @@ Engine::runPathFind(json::Value const& params, int connId, PushFn push)
 void
 Engine::ripplePathFind(json::Value params, DoneFn done)
 {
-    pool_->submit([this, params = std::move(params), done = std::move(done)] {
-        try
-        {
-            done(runRipplePathFind(params));
-        }
-        catch (std::exception const& ex)
-        {
-            errors_.fetch_add(1);
-            auto err = xrpl::rpcError(xrpl::RpcInternal);
-            err[xrpl::jss::error_message] = ex.what();
-            done(std::move(err));
-        }
-    });
+    try
+    {
+        pool_->submit([this, params = std::move(params), done = std::move(done)] {
+            try
+            {
+                done(runRipplePathFind(params));
+            }
+            catch (std::exception const& ex)
+            {
+                errors_.fetch_add(1);
+                auto err = xrpl::rpcError(xrpl::RpcInternal);
+                err[xrpl::jss::error_message] = ex.what();
+                done(std::move(err));
+            }
+        });
+    }
+    catch (std::exception const& ex)
+    {
+        errors_.fetch_add(1);
+        auto err = xrpl::rpcError(xrpl::RpcInternal);
+        err[xrpl::jss::error_message] = ex.what();
+        done(std::move(err));
+    }
 }
 
 void
@@ -921,19 +1095,29 @@ Engine::pathFind(json::Value params, int connId, PushFn push, DoneFn done)
         done(runPathFind(params, connId, std::move(push)));
         return;
     }
-    pool_->submit([this, params = std::move(params), connId, push = std::move(push), done = std::move(done)] {
-        try
-        {
-            done(runPathFind(params, connId, push));
-        }
-        catch (std::exception const& ex)
-        {
-            errors_.fetch_add(1);
-            auto err = xrpl::rpcError(xrpl::RpcInternal);
-            err[xrpl::jss::error_message] = ex.what();
-            done(std::move(err));
-        }
-    });
+    try
+    {
+        pool_->submit([this, params = std::move(params), connId, push = std::move(push), done = std::move(done)] {
+            try
+            {
+                done(runPathFind(params, connId, push));
+            }
+            catch (std::exception const& ex)
+            {
+                errors_.fetch_add(1);
+                auto err = xrpl::rpcError(xrpl::RpcInternal);
+                err[xrpl::jss::error_message] = ex.what();
+                done(std::move(err));
+            }
+        });
+    }
+    catch (std::exception const& ex)
+    {
+        errors_.fetch_add(1);
+        auto err = xrpl::rpcError(xrpl::RpcInternal);
+        err[xrpl::jss::error_message] = ex.what();
+        done(std::move(err));
+    }
 }
 
 void
@@ -975,22 +1159,7 @@ Engine::dropConnection(int connId)
         cache = cache_;
     }
     std::lock_guard lock(subMutex_);
-    auto range = connToSession_.equal_range(connId);
-    for (auto it = range.first; it != range.second; ++it)
-    {
-        auto sit = subs_.find(it->second);
-        if (sit != subs_.end())
-        {
-            sit->second.session->doClose();
-            if (cache)
-            {
-                cache->releaseSession(sit->second.session->id());
-                cache->forgetSession(sit->second.session->id());
-            }
-            subs_.erase(sit);
-        }
-    }
-    connToSession_.erase(connId);
+    forgetConnSessions(connId, cache);
 }
 
 }  // namespace pathfinder

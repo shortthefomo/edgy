@@ -5,6 +5,7 @@
 
 #include <xrpl/basics/Log.h>
 
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <streambuf>
 #include <string>
@@ -75,6 +77,37 @@ upstreamStateOk(std::string const& state)
         state.empty();
 }
 
+class CerrTee
+{
+public:
+    explicit CerrTee(std::string const& path)
+    {
+        if (path.empty())
+            return;
+        file_.open(path, std::ios::out | std::ios::app);
+        if (!file_)
+            throw std::runtime_error("cannot open debug log: " + path);
+        prev_ = std::cerr.rdbuf();
+        tee_.emplace(prev_, file_.rdbuf());
+        std::cerr.rdbuf(&*tee_);
+    }
+
+    ~CerrTee()
+    {
+        if (prev_)
+            std::cerr.rdbuf(prev_);
+    }
+
+    CerrTee(CerrTee const&) = delete;
+    CerrTee&
+    operator=(CerrTee const&) = delete;
+
+private:
+    std::ofstream file_;
+    std::streambuf* prev_{nullptr};
+    std::optional<TeeBuf> tee_;
+};
+
 }  // namespace
 
 int
@@ -83,18 +116,10 @@ main(int argc, char** argv)
     try
     {
         auto cfg = pathfinder::Config::fromArgs(argc, argv);
-        std::ofstream debugFile;
-        TeeBuf tee(nullptr, nullptr);
-        if (!cfg.debugLog.empty())
-        {
-            debugFile.open(cfg.debugLog, std::ios::out | std::ios::app);
-            if (!debugFile)
-                throw std::runtime_error("cannot open debug log: " + cfg.debugLog);
-            tee = TeeBuf(std::cerr.rdbuf(), debugFile.rdbuf());
-            std::cerr.rdbuf(&tee);
-        }
+        CerrTee debugTee(cfg.debugLog);
 
         boost::asio::io_context io{std::max(1, cfg.netThreads)};
+        auto work = boost::asio::make_work_guard(io);
 
         auto node = std::make_shared<pathfinder::NodeClient>(io, cfg.nodeWs);
         node->run();
@@ -105,6 +130,7 @@ main(int argc, char** argv)
 
         auto shutdownIo = [&] {
             node->stop();
+            work.reset();
             io.stop();
             for (auto& t : threads)
             {
@@ -168,6 +194,7 @@ main(int argc, char** argv)
             server.stop();
             engine.stop();
             node->stop();
+            work.reset();
             io.stop();
         });
 

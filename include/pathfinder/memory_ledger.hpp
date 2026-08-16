@@ -50,7 +50,8 @@ public:
         xrpl::Fees fees,
         xrpl::Rules rules,
         std::shared_ptr<Base const> base,
-        std::shared_ptr<Overlay const> overlay);
+        std::shared_ptr<Overlay const> overlay,
+        bool open = false);
 
     [[nodiscard]] xrpl::LedgerHeader const&
     header() const override;
@@ -127,6 +128,7 @@ private:
     xrpl::Rules rules_;
     std::shared_ptr<Base const> base_;
     std::shared_ptr<Overlay const> overlay_;
+    bool open_{false};
     mutable std::mutex decodeMutex_;
 };
 
@@ -141,6 +143,18 @@ public:
 
     void
     setHeader(xrpl::LedgerHeader header);
+
+    void
+    setOpen(bool open)
+    {
+        open_ = open;
+    }
+
+    [[nodiscard]] bool
+    open() const
+    {
+        return open_;
+    }
 
     void
     setFees(xrpl::Fees fees);
@@ -200,6 +214,7 @@ private:
     std::shared_ptr<MemoryLedger::Base> base_;
     std::shared_ptr<MemoryLedger::Overlay> overlay_;
     bool frozen_{false};
+    bool open_{false};
 };
 
 }  // namespace pathfinder

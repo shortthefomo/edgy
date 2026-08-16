@@ -112,11 +112,20 @@ AssetCache::advanceLedger(std::shared_ptr<ReadView const> const& ledger, bool fo
 
     auto const oldSeq = ledger_->header().seq;
     auto const newSeq = ledger->header().seq;
-    // Same-seq open → closed is a real view upgrade (mid-close then close).
-    // Same-seq closed → open / identical open is a no-op without forceClear.
-    bool const sameSeqUpgrade = oldSeq == newSeq && ledger_->open() && !ledger->open();
-    if (oldSeq == newSeq && !forceClear && !sameSeqUpgrade)
+    // Same sequence, new view: mid-close overlay publish or open → closed.
+    // Swap the ReadView so BookTip / RippleCalc see new offers, but do not
+    // evict cached lines (that work is for a real ledger advance).
+    if (oldSeq == newSeq && !forceClear)
+    {
+        if (ledger_ != ledger)
+        {
+            ledger_ = ledger;
+            ++ledgerAdvances_;
+            JLOG(journal_.debug()) << "advanceLedger same-seq view swap " << newSeq
+                                   << (ledger->open() ? " (open)" : " (closed)");
+        }
         return;
+    }
 
     ledger_ = ledger;
     ++ledgerAdvances_;
@@ -195,8 +204,7 @@ AssetCache::advanceLedger(std::shared_ptr<ReadView const> const& ledger, bool fo
         ++it;
     }
 
-    JLOG(journal_.debug()) << "advanceLedger " << oldSeq << " -> " << newSeq
-                           << (sameSeqUpgrade ? " (open->closed)" : "") << " retained "
+    JLOG(journal_.debug()) << "advanceLedger " << oldSeq << " -> " << newSeq << " retained "
                            << lines_.size() << " accounts / "
                            << totalLineCount_.load(std::memory_order_relaxed) << " lines";
 }

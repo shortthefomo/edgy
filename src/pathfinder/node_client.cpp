@@ -14,8 +14,11 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <deque>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -91,9 +94,13 @@ public:
     void
     run()
     {
-        auto const parsed = parseWsUrl(url_);
-        parsed_ = parsed;
-        net::post(strand_, [self = shared_from_this()] { self->doConnect(); });
+        parsed_ = parseWsUrl(url_);
+        net::post(strand_, [self = shared_from_this()] {
+            self->closing_ = false;
+            self->wantConnect_ = true;
+            self->pendingReconnect_ = true;
+            self->startConnect();
+        });
     }
 
     void
@@ -101,11 +108,9 @@ public:
     {
         net::post(strand_, [self = shared_from_this()] {
             self->closing_ = true;
-            beast::error_code ec;
-            if (self->ws_)
-                self->ws_->next_layer().cancel(ec);
-            if (self->wss_)
-                beast::get_lowest_layer(*self->wss_).cancel(ec);
+            self->wantConnect_ = false;
+            self->pendingReconnect_ = false;
+            self->cancelStream();
         });
         failPending("disconnected");
     }
@@ -169,6 +174,56 @@ public:
 
 private:
     void
+    cancelStream()
+    {
+        beast::error_code ec;
+        if (ws_)
+            ws_->next_layer().cancel(ec);
+        if (wss_)
+            beast::get_lowest_layer(*wss_).cancel(ec);
+    }
+
+    void
+    startConnect()
+    {
+        if (closing_ || !wantConnect_)
+            return;
+        // Never destroy a Beast stream while async_read/write is outstanding.
+        if (reading_ || writing_ || ws_ || wss_)
+        {
+            pendingReconnect_ = true;
+            cancelStream();
+            return;
+        }
+        pendingReconnect_ = false;
+        doConnect();
+    }
+
+    void
+    recycleStream()
+    {
+        if (reading_ || writing_)
+            return;
+        ws_.reset();
+        wss_.reset();
+        writes_.clear();
+        writing_ = false;
+        buffer_.consume(buffer_.size());
+        if (pendingReconnect_ && !closing_ && wantConnect_)
+            startConnect();
+    }
+
+    void
+    streamFailed(std::string const& why)
+    {
+        connected_.store(false);
+        notifyDisconnect(why);
+        failPending(why);
+        cancelStream();
+        recycleStream();
+    }
+
+    void
     doConnect()
     {
         try
@@ -205,11 +260,14 @@ private:
                 ws_->handshake(parsed_.host, parsed_.path);
             }
             connected_.store(true);
+            reading_ = true;
             doRead();
         }
         catch (std::exception const& ex)
         {
             connected_.store(false);
+            ws_.reset();
+            wss_.reset();
             notifyDisconnect(ex.what());
         }
     }
@@ -221,9 +279,8 @@ private:
             strand_, [self = shared_from_this()](beast::error_code ec, std::size_t) {
                 if (ec)
                 {
-                    self->connected_.store(false);
-                    self->notifyDisconnect(ec.message());
-                    self->failPending(ec.message());
+                    self->reading_ = false;
+                    self->streamFailed(ec.message());
                     return;
                 }
                 self->handleFrame();
@@ -234,6 +291,8 @@ private:
             wss_->async_read(buffer_, onRead);
         else if (ws_)
             ws_->async_read(buffer_, onRead);
+        else
+            reading_ = false;
     }
 
     void
@@ -308,6 +367,8 @@ private:
     void
     enqueueWrite(std::string body)
     {
+        if (closing_ || (!ws_ && !wss_))
+            return;
         writes_.push_back(std::move(body));
         if (!writing_)
         {
@@ -322,6 +383,7 @@ private:
         if (writes_.empty())
         {
             writing_ = false;
+            recycleStream();
             return;
         }
         auto cb = net::bind_executor(
@@ -331,9 +393,7 @@ private:
                 if (ec)
                 {
                     self->writing_ = false;
-                    self->connected_.store(false);
-                    self->notifyDisconnect(ec.message());
-                    self->failPending(ec.message());
+                    self->streamFailed(ec.message());
                     return;
                 }
                 self->doWrite();
@@ -343,7 +403,10 @@ private:
         else if (ws_)
             ws_->async_write(net::buffer(writes_.front()), cb);
         else
+        {
             writing_ = false;
+            recycleStream();
+        }
     }
 
     void
@@ -385,6 +448,9 @@ private:
     beast::flat_buffer buffer_;
     std::atomic<bool> connected_{false};
     bool closing_{false};
+    bool wantConnect_{false};
+    bool pendingReconnect_{false};
+    bool reading_{false};
     bool writing_{false};
     std::deque<std::string> writes_;
     std::atomic<int> nextId_{1};

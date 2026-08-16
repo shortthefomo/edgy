@@ -109,6 +109,12 @@ private:
     void
     midCloseTick();
 
+    void
+    waitApplyIdle();
+
+    void
+    forgetConnSessions(int connId, std::shared_ptr<xrpl::AssetCache> const& cache);
+
     json::Value
     runRipplePathFind(json::Value const& params);
 
@@ -169,6 +175,8 @@ private:
     std::condition_variable applyCv_;
     std::queue<ApplyItem> applyQueue_;
     std::atomic<bool> dirty_{false};
+    std::atomic<bool> needResync_{false};
+    std::atomic<bool> applyIdle_{true};
     std::chrono::steady_clock::time_point lastTick_{};
 };
 
