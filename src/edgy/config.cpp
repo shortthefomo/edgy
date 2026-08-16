@@ -1,4 +1,5 @@
 #include <edgy/config.hpp>
+#include <edgy/version.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -30,6 +31,7 @@ usage()
         << "  --timeout-ms <n>            Abort one search after N ms (0 = none)\n"
         << "  --full-snapshot [0|1|full]  Full ledger vs books-only (default full)\n"
         << "  --no-proxy                  Do not forward unknown RPCs to xrpld\n"
+        << "  --version                   Print version and exit\n"
         << "  --help\n"
         << "\n"
         << "File stanzas (value on the following line, like xrpld.cfg):\n"
@@ -288,6 +290,11 @@ Config::fromArgs(int argc, char** argv)
         if (arg == "--help" || arg == "-h")
         {
             usage();
+            std::exit(0);
+        }
+        else if (arg == "--version" || arg == "-v")
+        {
+            std::cout << "edgy " << versionString() << '\n';
             std::exit(0);
         }
         else if (arg == "--conf" || arg == "-c")

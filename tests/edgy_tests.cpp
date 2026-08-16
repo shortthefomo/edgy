@@ -1,4 +1,5 @@
 #include <edgy/config.hpp>
+#include <edgy/version.hpp>
 #include <edgy/engine.hpp>
 #include <edgy/graph.hpp>
 #include <edgy/memory_ledger.hpp>
@@ -67,6 +68,11 @@ main()
     using namespace edgy;
 
     expect(xrpl::rpc::tuning::kPathFindMaxPaths == 6, "max paths is 6 (xrpld)");
+    {
+        auto const v = versionString();
+        expect(v.find(kVersionBase) == 0, "version string starts with kVersionBase");
+        expect(!v.empty(), "version string is not empty");
+    }
     {
         Config d;
         expect(d.search == Config::kSearchFull, "default [search] is full");

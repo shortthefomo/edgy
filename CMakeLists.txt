@@ -8,7 +8,19 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(edgy LANGUAGES CXX)
+project(edgy VERSION 0.1.0 LANGUAGES CXX)
+
+set(EDGY_GIT_HASH "")
+find_package(Git QUIET)
+if(Git_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=8 HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE EDGY_GIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +73,7 @@ add_library(edgy_core STATIC
     src/edgy/session.cpp
     src/edgy/engine.cpp
     src/edgy/server.cpp
+    src/edgy/version.cpp
     src/vendor/path/Pathfinder.cpp
     src/vendor/path/AssetCache.cpp
     src/vendor/path/TrustLine.cpp
@@ -87,7 +100,11 @@ target_compile_definitions(
         BOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT
         BOOST_BEAST_ALLOW_DEPRECATED
         BOOST_CONTAINER_FWD_BAD_DEQUE
+        EDGY_VERSION="${PROJECT_VERSION}"
 )
+if(EDGY_GIT_HASH)
+    target_compile_definitions(edgy_core PUBLIC EDGY_GIT_HASH="${EDGY_GIT_HASH}")
+endif()
 
 target_link_libraries(
     edgy_core
@@ -120,3 +137,11 @@ target_link_libraries(edgy_tests PRIVATE edgy_core)
 
 enable_testing()
 add_test(NAME edgy_tests COMMAND edgy_tests)
+
+include(GNUInstallDirs)
+install(TARGETS edgy RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(
+    FILES ${CMAKE_SOURCE_DIR}/cfg/edgy.example.cfg
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/edgy
+    RENAME edgy.cfg
+)
