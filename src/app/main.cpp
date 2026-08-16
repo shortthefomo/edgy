@@ -154,7 +154,8 @@ main(int argc, char** argv)
             }
         }
 
-        std::cerr << "checking upstream " << cfg.nodeWs << " server_state\n"
+        std::cerr << "checking upstream " << cfg.nodeSoftware() << " " << cfg.nodeWs
+                  << " server_state\n"
                   << std::flush;
         json::Value info;
         try
@@ -202,7 +203,9 @@ main(int argc, char** argv)
         std::cerr << "Edgy " << edgy::versionString() << " local path_find sidecar\n";
         if (!cfg.configPath.empty())
             std::cerr << "  config    " << cfg.configPath << '\n';
-        std::cerr << "  upstream  " << cfg.nodeWs << '\n'
+        std::cerr << "  network   " << cfg.networkName() << " (native "
+                  << cfg.nativeCurrency() << ", upstream " << cfg.nodeSoftware() << ")\n"
+                  << "  upstream  " << cfg.nodeWs << '\n'
                   << "  listen-ws " << cfg.listenWs << '\n'
                   << "  listen-rpc " << cfg.listenRpc << '\n'
                   << "  workers   " << cfg.workers << '\n'

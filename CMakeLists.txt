@@ -67,6 +67,7 @@ set_target_properties(
 add_library(edgy_core STATIC
     src/edgy/config.cpp
     src/edgy/memory_ledger.cpp
+    src/edgy/protocol.cpp
     src/edgy/graph.cpp
     src/edgy/order_books.cpp
     src/edgy/node_client.cpp

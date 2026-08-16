@@ -1,17 +1,17 @@
 # Edgy
 
-A local XRPL `path_find` / `ripple_path_find` sidecar. It full-syncs the validated ledger from an `xrpld` node, keeps that state in memory, and answers path-finding from the local snapshot so searches do not wait on another node.
+A local `path_find` / `ripple_path_find` sidecar for the **[XRP Ledger](https://github.com/XRPLF/rippled)** (`xrpld`) and **[Xahau](https://github.com/Xahau/xahaud)** (`xahaud`). It full-syncs the validated ledger from the node, keeps that state in memory, and answers path-finding from the local snapshot so searches do not wait on another node.
 
-Wire JSON matches xrpld: `alternatives`, `source_amount`, `paths_computed`, `paths_canonical`, `full_reply`, ledger identity, and the path warning tokens.
+Wire JSON matches the node: `alternatives`, `source_amount`, `paths_computed`, `paths_canonical`, `full_reply`, ledger identity, and the path warning tokens. On Xahau the native asset is **XAH** (drop strings still work).
 
 A Payment can carry at most **6 paths**, each at most **8 hops**. Edgy never returns more than that.
 
 ## Why this exists
 
-`xrpld` Pathfinder is expensive under many concurrent WebSocket sessions. This process:
+`xrpld` / `xahaud` Pathfinder is expensive under many concurrent WebSocket sessions. This process:
 
 1. Full-syncs every ledger object once (`ledger_data`, binary).
-2. Applies each validated transaction’s binary `AffectedNodes` locally.
+2. Applies each validated transaction’s `AffectedNodes` locally.
 3. Finds book/AMM routes on an in-memory payment graph, then runs RippleCalc only on the best few.
 4. Serves a worker pool (default 128, cap 256) so ~100 concurrent `path_find` sockets stay live.
 5. Proxies every other RPC/WS command to the upstream node.
@@ -23,15 +23,48 @@ Not xrpld’s Pathfinder table (level 1–10). Search is a local book graph:
 1. **Scan** every 1-hop and 2-hop book pair (set intersection on the adjacency list).
 2. **Score** each pair from stored book-tip quality (`ExchangeRate` on directory roots). No offer walk.
 3. **RippleCalc** only the best ~8–12 candidates; keep **6** unique hop lists.
-4. Longer hops (via XRP, then up to 8) fill leftover slots as a live WebSocket ages.
+4. Longer hops (via the native asset, then up to 8) fill leftover slots as a live WebSocket ages.
 
 HTTP `ripple_path_find` is one mid-depth shot. WebSocket `path_find` starts shallow (fast first reply) and deepens while the socket stays open (about 4s / 12s / 25s / 50s, staggered per session).
 
 Open subscriptions are **repriced every 100ms**. Ledger close also reprices. At most four sessions deepen on a given tick so 100 sockets do not convoy the worker pool. One update is in flight per session.
 
+## Download a release
+
+Binaries and notes: [github.com/shortthefomo/edgy/releases](https://github.com/shortthefomo/edgy/releases). Latest: [releases/latest](https://github.com/shortthefomo/edgy/releases/latest).
+
+Assets are named `edgy-<version>-<os>-<arch>` (for example `edgy-0.1.3-darwin-arm64` on macOS Apple Silicon). Other platforms should [build from source](BUILD.md) until a matching asset is attached.
+
+```bash
+# pick the asset name from the latest release page
+VER=0.1.3
+curl -L -o edgy \
+  "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-${VER}-darwin-arm64"
+chmod +x edgy
+./edgy --version
+# edgy 0.1.3+<git>
+```
+
+Grab a starter config from the same tag (or copy `cfg/edgy.example.cfg` from a clone):
+
+```bash
+curl -L -o edgy.cfg \
+  https://raw.githubusercontent.com/shortthefomo/edgy/v0.1.3/cfg/edgy.example.cfg
+```
+
+Edit `[node]` to your node’s WebSocket. Then:
+
+```bash
+./edgy --conf edgy.cfg
+```
+
+Xahau (`[network] xahau` / `--xahau`) is on this tree. Use a binary built from `xahaud-support` or later, or [build from source](BUILD.md), until a release newer than `0.1.3` is published.
+
+A full XRPL mainnet snapshot is ~19 million objects and needs tens of gigabytes of RAM. Xahau is smaller. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
+
 ## Build
 
-See [`BUILD.md`](BUILD.md).
+See [`BUILD.md`](BUILD.md). After a local Release build the binary is `.build/edgy`.
 
 ## Run
 
@@ -39,6 +72,7 @@ Configuration is an xrpld-style `.cfg` (stanzas). Copy the example and edit:
 
 ```bash
 cp cfg/edgy.example.cfg edgy.cfg
+# or, with a downloaded binary: ./edgy --conf edgy.cfg
 .build/edgy --conf edgy.cfg
 ```
 
@@ -56,6 +90,9 @@ If `edgy.cfg` or `cfg/edgy.cfg` exists in the working directory, it is loaded au
 
 [node]
 ws://127.0.0.1:6006
+
+[network]
+xrpl
 
 [workers]
 64
@@ -95,17 +132,36 @@ full
 ```
 
 ```bash
+# XRPL (default)
 .build/edgy --conf edgy.cfg --workers 64
+
+# Xahau — same binary, switch the ledger family
+.build/edgy --conf edgy.cfg --xahau --node ws://127.0.0.1:6006
 ```
+
+### Xahau
+
+Edgy still links `libxrpl` from rippled. Point `[node]` at an [xahaud](https://github.com/Xahau/xahaud) WebSocket and set the family:
+
+```
+[node]
+ws://127.0.0.1:6006
+
+[network]
+xahau
+```
+
+`--xahau` / `--network xahau` and `EDGY_NETWORK=xahau` do the same. Public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_info`). Native amounts accept and return `XAH` instead of `XRP`. Drop strings (`"1000000"`) work on both networks. Unknown xahaud ledger types (Hooks, URITokens) are stored as blobs and skipped for path finding.
 
 Startup connects to `[node]` and requires `server_info.info.server_state` to be `full`, `proposing`, or `unknown`. Anything else (`syncing`, `connected`, …) exits immediately with a fatal error — it will not listen or snapshot.
 
-Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before expecting path results. A full mainnet snapshot is ~19M objects and takes a few minutes. `server_info` is forwarded to the upstream node.
+Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before expecting path results. `server_info` is forwarded to the upstream node. After each close, stderr should show `txs=N/N … inline with node`.
 
 | Flag / stanza | Meaning |
 | --- | --- |
 | `--conf` / file path | Config file |
-| `[node]` / `--node` | Upstream `xrpld` WebSocket |
+| `[node]` / `--node` | Upstream `xrpld` or `xahaud` WebSocket |
+| `[network]` / `--network` | `xrpl` (default) or `xahau`. `--xahau` is the same as `--network xahau` |
 | `[listen-ws]` / `--listen-ws` | Local WebSocket (`path_find` + proxy) |
 | `[listen-rpc]` / `--listen-rpc` | Local HTTP JSON-RPC |
 | `[workers]` / `--workers` | Concurrent search threads (1–256, default 128) |
@@ -122,11 +178,11 @@ Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `sna
 | `[line_chunk_size]` | Line-fetch chunk |
 | `[cache_reuse_ledgers]` | Reuse line cache across this many ledgers |
 
-`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted.
+`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted. `EDGY_NETWORK` overrides `[network]` unless `--network` / `--xahau` is also passed.
 
 Default is a full ledger sync and a full book-graph search. Set `[search-fast]` below `[search]` to start WebSocket replies shallow and deepen while the socket stays open.
 
-## API (same as xrpld)
+## API (same as xrpld / xahaud)
 
 **WebSocket `path_find`**
 
@@ -142,7 +198,9 @@ Default is a full ledger sync and a full book-graph search. Set `[search-fast]` 
 }
 ```
 
-Create returns a first (shallow) result. Later unsolicited frames have `"type": "path_find"` about every 100ms (reprice) and after each closed ledger. Hop width increases while the socket stays open. `close` / `status` work as on xrpld.
+Create returns a first (shallow) result. Later unsolicited frames have `"type": "path_find"` about every 100ms (reprice) and after each closed ledger. Hop width increases while the socket stays open. `close` / `status` work as on the node.
+
+On Xahau, native amounts may use `"currency": "XAH"` or a drop string (`"1000000"`). Replies use `XAH` for native.
 
 **HTTP `ripple_path_find`**
 

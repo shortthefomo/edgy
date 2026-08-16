@@ -61,6 +61,18 @@ shouldApplyStreamTx(std::uint32_t txSeq, std::uint32_t currentSeq) noexcept
     return txSeq == 0 || txSeq >= currentSeq;
 }
 
+// nodeTxs is the previous close's txn_count. applyTxs is txs we processed;
+// noMeta is txs that arrived with no meta at all. Per-node parseFail must
+// not be added — that made txs=N/N warn txs!=N after every close.
+[[nodiscard]] inline bool
+applyTxsMatchNode(
+    std::uint64_t applyTxs,
+    std::uint64_t noMeta,
+    std::uint32_t nodeTxs) noexcept
+{
+    return nodeTxs == 0 || applyTxs + noMeta == nodeTxs;
+}
+
 // Apply stream JSON meta (AffectedNodes). Used by the live apply path and tests.
 struct StreamMetaStats
 {
@@ -238,6 +250,7 @@ private:
     // Apply-thread only. Reset after each closed ledger / snapshot.
     std::uint64_t applyTxs_{0};
     std::uint64_t applyNoMeta_{0};
+    std::uint64_t applyParseFail_{0};
     std::uint32_t prevCloseTxs_{0};
     std::uint64_t applyCreated_{0};
     std::uint64_t applyDeleted_{0};

@@ -14,7 +14,7 @@
 namespace edgy {
 
 /**
- * Single WebSocket connection to an xrpld node.
+ * Single WebSocket connection to an xrpld or xahaud node.
  *
  * Request/response is correlated by numeric `id`. Unsolicited stream frames
  * (ledger, transaction) are delivered to the registered handlers.
