@@ -1,8 +1,8 @@
-#include <pathfinder/session.hpp>
+#include <edgy/session.hpp>
 
-#include <pathfinder/config.hpp>
-#include <pathfinder/graph.hpp>
-#include <pathfinder/services.hpp>
+#include <edgy/config.hpp>
+#include <edgy/graph.hpp>
+#include <edgy/services.hpp>
 
 #include <xrpld/rpc/detail/AccountAssets.h>
 #include <xrpld/rpc/detail/PathfinderUtils.h>
@@ -31,7 +31,7 @@
 #include <vector>
 #include <variant>
 
-namespace pathfinder {
+namespace edgy {
 namespace {
 
 constexpr int kPjInvalid = -1;
@@ -864,4 +864,4 @@ PathSession::doUpdate(
     return newStatus;
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

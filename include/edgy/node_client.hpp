@@ -11,7 +11,7 @@
 #include <memory>
 #include <string>
 
-namespace pathfinder {
+namespace edgy {
 
 /**
  * Single WebSocket connection to an xrpld node.
@@ -65,4 +65,4 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

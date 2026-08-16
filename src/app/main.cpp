@@ -1,7 +1,7 @@
-#include <pathfinder/config.hpp>
-#include <pathfinder/engine.hpp>
-#include <pathfinder/node_client.hpp>
-#include <pathfinder/server.hpp>
+#include <edgy/config.hpp>
+#include <edgy/engine.hpp>
+#include <edgy/node_client.hpp>
+#include <edgy/server.hpp>
 
 #include <xrpl/basics/Log.h>
 
@@ -115,13 +115,13 @@ main(int argc, char** argv)
 {
     try
     {
-        auto cfg = pathfinder::Config::fromArgs(argc, argv);
+        auto cfg = edgy::Config::fromArgs(argc, argv);
         CerrTee debugTee(cfg.debugLog);
 
         boost::asio::io_context io{std::max(1, cfg.netThreads)};
         auto work = boost::asio::make_work_guard(io);
 
-        auto node = std::make_shared<pathfinder::NodeClient>(io, cfg.nodeWs);
+        auto node = std::make_shared<edgy::NodeClient>(io, cfg.nodeWs);
         node->run();
 
         std::vector<std::thread> threads;
@@ -182,10 +182,10 @@ main(int argc, char** argv)
                 " (need full, proposing, or unknown)");
         }
 
-        pathfinder::Engine engine(io, cfg, node);
+        edgy::Engine engine(io, cfg, node);
         engine.start();
 
-        pathfinder::Server server(io, cfg, engine, node);
+        edgy::Server server(io, cfg, engine, node);
         server.start();
 
         boost::asio::signal_set signals(io, SIGINT, SIGTERM);
@@ -198,7 +198,7 @@ main(int argc, char** argv)
             io.stop();
         });
 
-        std::cerr << "PathFinder local path_find sidecar\n";
+        std::cerr << "Edgy local path_find sidecar\n";
         if (!cfg.configPath.empty())
             std::cerr << "  config    " << cfg.configPath << '\n';
         std::cerr << "  upstream  " << cfg.nodeWs << '\n'
@@ -208,10 +208,10 @@ main(int argc, char** argv)
                   << "  net       " << cfg.netThreads << " event-loop threads\n"
                   << "  update    " << cfg.midCloseDelay.count() << "ms\n"
                   << "  search    " << cfg.search
-                  << (cfg.search == pathfinder::Config::kSearchFull ? " (full)" : "")
+                  << (cfg.search == edgy::Config::kSearchFull ? " (full)" : "")
                   << '\n'
                   << "  search-fast " << cfg.searchFast
-                  << (cfg.searchFast == pathfinder::Config::kSearchFull ? " (full)" : "")
+                  << (cfg.searchFast == edgy::Config::kSearchFull ? " (full)" : "")
                   << '\n'
                   << "  timeout   "
                   << (cfg.searchTimeout.count() == 0

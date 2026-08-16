@@ -1,6 +1,6 @@
 #pragma once
 
-#include <pathfinder/order_books.hpp>
+#include <edgy/order_books.hpp>
 
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/base_uint.h>
@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace pathfinder {
+namespace edgy {
 
 /**
  * Minimal ServiceRegistry for Pathfinder + RippleCalc.
@@ -346,4 +346,4 @@ private:
     std::optional<xrpl::uint256> trapTxID_;
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

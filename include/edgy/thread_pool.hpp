@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 
 class ThreadPool
 {
@@ -115,4 +115,4 @@ private:
     std::atomic<std::size_t> pending_{0};
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

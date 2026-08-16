@@ -1,4 +1,4 @@
-#include <pathfinder/server.hpp>
+#include <edgy/server.hpp>
 
 #include <xrpl/json/json_reader.h>
 #include <xrpl/json/to_string.h>
@@ -33,7 +33,7 @@
 #include <utility>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
@@ -187,7 +187,7 @@ public:
             json::Value info{json::ValueType::Object};
             info["info"] = s;
             info["info"]["server_state"] = engine_.ready() ? "full" : "syncing";
-            info["info"]["build_version"] = "pathfinder-local";
+            info["info"]["build_version"] = "edgy";
             done(std::move(info));
             return;
         }
@@ -563,4 +563,4 @@ Server::stop()
     impl_->stop();
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

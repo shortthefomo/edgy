@@ -16,7 +16,7 @@
 #include <optional>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 
 /**
  * Immutable in-memory ledger tuned for path_find.
@@ -217,4 +217,4 @@ private:
     bool open_{false};
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

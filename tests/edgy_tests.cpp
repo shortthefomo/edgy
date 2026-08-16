@@ -1,11 +1,11 @@
-#include <pathfinder/config.hpp>
-#include <pathfinder/engine.hpp>
-#include <pathfinder/graph.hpp>
-#include <pathfinder/memory_ledger.hpp>
-#include <pathfinder/node_client.hpp>
-#include <pathfinder/order_books.hpp>
-#include <pathfinder/services.hpp>
-#include <pathfinder/session.hpp>
+#include <edgy/config.hpp>
+#include <edgy/engine.hpp>
+#include <edgy/graph.hpp>
+#include <edgy/memory_ledger.hpp>
+#include <edgy/node_client.hpp>
+#include <edgy/order_books.hpp>
+#include <edgy/services.hpp>
+#include <edgy/session.hpp>
 
 #include <xrpld/rpc/detail/AssetCache.h>
 #include <xrpld/rpc/detail/Pathfinder.h>
@@ -64,7 +64,7 @@ testAccount(char const* b58)
 int
 main()
 {
-    using namespace pathfinder;
+    using namespace edgy;
 
     expect(xrpl::rpc::tuning::kPathFindMaxPaths == 6, "max paths is 6 (xrpld)");
     {
@@ -76,7 +76,7 @@ main()
     }
 
     {
-        auto const path = std::string{"/tmp/pathfinder-test.cfg"};
+        auto const path = std::string{"/tmp/edgy-test.cfg"};
         {
             std::ofstream out(path);
             out << "# comment\n"
@@ -87,7 +87,7 @@ main()
                 << "[net-threads]\n2\n"
                 << "[update-ms]\n150\n"
                 << "[proxy]\n0\n"
-                << "[debug]\n/private/tmp/pathfinder.log\n"
+                << "[debug]\n/private/tmp/edgy.log\n"
                 << "[path_find]\n"
                 << "max_total_lines=1234\n"
                 << "max_lines_per_account=56\n";
@@ -100,16 +100,16 @@ main()
         expect(cfg.netThreads == 2, "cfg [net-threads]");
         expect(cfg.midCloseDelay.count() == 150, "cfg [update-ms]");
         expect(!cfg.proxyOther, "cfg [proxy] 0");
-        expect(cfg.debugLog == "/private/tmp/pathfinder.log", "cfg [debug]");
+        expect(cfg.debugLog == "/private/tmp/edgy.log", "cfg [debug]");
         expect(cfg.maxTotalLines == 1234, "cfg [path_find] max_total_lines");
         expect(cfg.maxLinesPerAccount == 56, "cfg [path_find] max_lines_per_account");
     }
 
     {
-        auto const path = std::string{"/tmp/pathfinder-test-stanzas.cfg"};
+        auto const path = std::string{"/tmp/edgy-test-stanzas.cfg"};
         {
             std::ofstream out(path);
-            out << "[debug]\n/private/tmp/pathfinder.log\n"
+            out << "[debug]\n/private/tmp/edgy.log\n"
                 << "[listen-ws]\n0.0.0.0:6008\n"
                 << "[listen-rpc]\n0.0.0.0:5008\n"
                 << "[node]\nws://127.0.0.1:6006\n"
@@ -127,7 +127,7 @@ main()
                 << "[full-snapshot]\nfull\n";
         }
         auto const cfg = Config::fromFile(path);
-        expect(cfg.debugLog == "/private/tmp/pathfinder.log", "stanza [debug]");
+        expect(cfg.debugLog == "/private/tmp/edgy.log", "stanza [debug]");
         expect(cfg.listenWs == "0.0.0.0:6008", "stanza [listen-ws]");
         expect(cfg.listenRpc == "0.0.0.0:5008", "stanza [listen-rpc]");
         expect(cfg.nodeWs == "ws://127.0.0.1:6006", "stanza [node]");
@@ -146,7 +146,7 @@ main()
     }
 
     {
-        auto const path = std::string{"/tmp/pathfinder-test-modes.cfg"};
+        auto const path = std::string{"/tmp/edgy-test-modes.cfg"};
         {
             std::ofstream out(path);
             out << "[search]\n2\n"
@@ -162,9 +162,9 @@ main()
     }
 
     {
-        char arg0[] = "pathfinder";
+        char arg0[] = "edgy";
         char arg1[] = "--conf";
-        auto const path = std::string{"/tmp/pathfinder-test-override.cfg"};
+        auto const path = std::string{"/tmp/edgy-test-override.cfg"};
         {
             std::ofstream out(path);
             out << "[node]\nws://10.0.0.2:6006\n[workers]\n16\n";
@@ -180,7 +180,7 @@ main()
     }
 
     {
-        char arg0[] = "pathfinder";
+        char arg0[] = "edgy";
         char a1[] = "--search";
         char a2[] = "full";
         char a3[] = "--search-fast";
@@ -199,8 +199,8 @@ main()
 
     {
         char const* shipped[] = {
-            "cfg/pathfinder.example.cfg",
-            "/Users/fomo/Dev/Ledgers/PathFinder/cfg/pathfinder.example.cfg",
+            "cfg/edgy.example.cfg",
+            "/Users/fomo/Dev/Ledgers/PathFinder/cfg/edgy.example.cfg",
         };
         bool parsed = false;
         for (auto const* p : shipped)
@@ -211,8 +211,8 @@ main()
             auto const cfg = Config::fromFile(p);
             expect(cfg.listenWs == "0.0.0.0:6008", "shipped [listen-ws]");
             expect(cfg.nodeWs == "ws://127.0.0.1:6006", "shipped [node]");
-            expect(cfg.debugLog == "/tmp/pathfinder.log" ||
-                       cfg.debugLog == "/private/tmp/pathfinder.log",
+            expect(cfg.debugLog == "/tmp/edgy.log" ||
+                       cfg.debugLog == "/private/tmp/edgy.log",
                    "shipped [debug]");
             expect(cfg.search == Config::kSearchFull, "shipped [search] full");
             expect(cfg.searchFast == Config::kSearchFull, "shipped [search-fast] full");
@@ -220,7 +220,7 @@ main()
             parsed = true;
             break;
         }
-        expect(parsed, "shipped pathfinder.cfg parses");
+        expect(parsed, "shipped edgy.example.cfg parses");
     }
 
     {
@@ -457,8 +457,8 @@ main()
         auto node = std::make_shared<NodeClient>(io, "ws://127.0.0.1:6006");
         Engine engine(io, Config{}, node);
         auto info = engine.pathCountsJson();
-        expect(info.isMember("source") && info["source"].asString() == "pathfinder",
-               "path_counts source is pathfinder");
+        expect(info.isMember("source") && info["source"].asString() == "edgy",
+               "path_counts source is edgy");
         expect(info.isMember("sessions"), "path_counts sessions");
         expect(info.isMember("inflight"), "path_counts inflight");
         expect(info.isMember("workers_pending"), "path_counts workers_pending");

@@ -1,6 +1,6 @@
-#include <pathfinder/graph.hpp>
+#include <edgy/graph.hpp>
 
-#include <pathfinder/order_books.hpp>
+#include <edgy/order_books.hpp>
 
 #include <xrpld/rpc/detail/PathfinderUtils.h>
 #include <xrpld/rpc/detail/Tuning.h>
@@ -24,7 +24,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 namespace {
 
 xrpl::STPathElement
@@ -527,4 +527,4 @@ FastPathFinder::search(
     return result;
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

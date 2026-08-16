@@ -20,7 +20,7 @@
 #include <optional>
 #include <set>
 
-namespace pathfinder {
+namespace edgy {
 
 struct Config;
 
@@ -168,4 +168,4 @@ private:
     std::atomic<int> lastDepth_{0};
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

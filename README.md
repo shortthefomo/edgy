@@ -1,10 +1,10 @@
-# PathFinder
+# Edgy
 
 A local XRPL `path_find` / `ripple_path_find` sidecar. It full-syncs the validated ledger from an `xrpld` node, keeps that state in memory, and answers path-finding from the local snapshot so searches do not wait on another node.
 
 Wire JSON matches xrpld: `alternatives`, `source_amount`, `paths_computed`, `paths_canonical`, `full_reply`, ledger identity, and the path warning tokens.
 
-A Payment can carry at most **6 paths**, each at most **8 hops**. PathFinder never returns more than that.
+A Payment can carry at most **6 paths**, each at most **8 hops**. Edgy never returns more than that.
 
 ## Why this exists
 
@@ -31,31 +31,22 @@ Open subscriptions are **repriced every 100ms**. Ledger close also reprices. At 
 
 ## Build
 
-Needs the sibling rippled tree configured and `libxrpl.a` built (Conan toolchain in `rippled/.build`).
-
-```bash
-cmake -S . -B .build \
-  -DCMAKE_TOOLCHAIN_FILE=../rippled/.build/build/generators/conan_toolchain.cmake \
-  -DRIPPLED_ROOT=../rippled \
-  -DRIPPLED_BUILD=../rippled/.build
-cmake --build .build -j
-ctest --test-dir .build --output-on-failure
-```
+See [`BUILD.md`](BUILD.md).
 
 ## Run
 
 Configuration is an xrpld-style `.cfg` (stanzas). Copy the example and edit:
 
 ```bash
-cp cfg/pathfinder.example.cfg pathfinder.cfg
-.build/pathfinder --conf pathfinder.cfg
+cp cfg/edgy.example.cfg edgy.cfg
+.build/edgy --conf edgy.cfg
 ```
 
-If `pathfinder.cfg` or `cfg/pathfinder.cfg` exists in the working directory, it is loaded automatically. Command-line flags override the file.
+If `edgy.cfg` or `cfg/edgy.cfg` exists in the working directory, it is loaded automatically. (`pathfinder.cfg` is still accepted.) Command-line flags override the file.
 
 ```
 [debug]
-/private/tmp/pathfinder.log
+/tmp/edgy.log
 
 [listen-ws]
 0.0.0.0:6008
@@ -104,7 +95,7 @@ full
 ```
 
 ```bash
-.build/pathfinder --conf pathfinder.cfg --workers 64
+.build/edgy --conf edgy.cfg --workers 64
 ```
 
 Startup connects to `[node]` and requires `server_info.info.server_state` to be `full`, `proposing`, or `unknown`. Anything else (`syncing`, `connected`, …) exits immediately with a fatal error — it will not listen or snapshot.
@@ -131,7 +122,7 @@ Point clients at `ws://127.0.0.1:6008` or `http://127.0.0.1:5008`. Wait for `sna
 | `[line_chunk_size]` | Line-fetch chunk |
 | `[cache_reuse_ledgers]` | Reuse line cache across this many ledgers |
 
-`PATHFINDER_NODE` overrides `[node]` unless `--node` is also passed.
+`EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted.
 
 Default is a full ledger sync and a full book-graph search. Set `[search-fast]` below `[search]` to start WebSocket replies shallow and deepen while the socket stays open.
 
@@ -170,7 +161,7 @@ One-shot result: `alternatives[]` with `source_amount`, `paths_computed` (≤6),
 
 Optional warning tokens match the node: `path_lines_partial`, `path_revalidate_failed`, `path_source_currencies_truncated`, `path_lines_budget`.
 
-**`path_counts`** (local PathFinder counters; `source` is `"pathfinder"`). **`get_counts`** is forwarded to `[node]`.
+**`path_counts`** (local Edgy counters; `source` is `"edgy"`). **`get_counts`** is forwarded to `[node]`.
 
 ```json
 { "command": "path_counts" }
@@ -223,12 +214,12 @@ Poll this on a timer to graph load. Fields sit at the top of `result`, matching 
 ## Layout
 
 ```
-include/pathfinder/     sidecar (ledger, graph, engine, WS/HTTP)
+include/edgy/           sidecar (ledger, graph, engine, WS/HTTP)
 include/xrpld/rpc/      AssetCache / Pathfinder headers (include-path shim)
-src/pathfinder/         sidecar implementation
+src/edgy/               sidecar implementation
 src/vendor/path/        AssetCache, TrustLine, AccountAssets (and unused Pathfinder copy)
 src/app/main.cpp
-tests/pathfinder_tests.cpp
+tests/edgy_tests.cpp
 ```
 
 Live search is `FastPathFinder` in `graph.cpp` + `LocalOrderBooks`. RippleCalc still comes from `libxrpl`.
