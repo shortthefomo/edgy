@@ -45,9 +45,20 @@ public:
 
     ~ThreadPool()
     {
+        shutdown();
+    }
+
+    void
+    shutdown()
+    {
         {
             std::lock_guard lock(mutex_);
-            stop_ = true;
+            if (stop_)
+            {
+                // Already shutting down; still join below if workers remain.
+            }
+            else
+                stop_ = true;
         }
         cv_.notify_all();
         for (auto& t : workers_)
@@ -55,6 +66,7 @@ public:
             if (t.joinable())
                 t.join();
         }
+        workers_.clear();
     }
 
     ThreadPool(ThreadPool const&) = delete;

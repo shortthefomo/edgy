@@ -433,21 +433,31 @@ PathSession::revalidatePaths(
     }();
 
     xrpl::path::RippleCalc::Input rcInput;
+    rcInput.defaultPathsAllowed = false;
     if (convertAll_)
         rcInput.partialPaymentAllowed = true;
 
     auto const ledger = calcLedger ? calcLedger : cache->getLedger();
-    xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-    auto rc = xrpl::path::RippleCalc::rippleCalculate(
-        sandbox,
-        saMaxAmount,
-        dstAmount,
-        *dst_,
-        *src_,
-        paths,
-        domain_,
-        registry_,
-        &rcInput);
+    xrpl::path::RippleCalc::Output rc;
+    try
+    {
+        xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
+        rc = xrpl::path::RippleCalc::rippleCalculate(
+            sandbox,
+            saMaxAmount,
+            dstAmount,
+            *dst_,
+            *src_,
+            paths,
+            domain_,
+            registry_,
+            &rcInput);
+    }
+    catch (std::exception const& ex)
+    {
+        JLOG(journal_.warn()) << "revalidate RippleCalc: " << ex.what();
+        return false;
+    }
 
     if (rc.result() != xrpl::tesSUCCESS)
         return false;
@@ -673,36 +683,43 @@ PathSession::findPaths(
         if (convertAll_)
             rcInput.partialPaymentAllowed = true;
         auto const tCalc = std::chrono::steady_clock::now();
-        xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-        auto rc = xrpl::path::RippleCalc::rippleCalculate(
-            sandbox, saMaxAmount, dstAmount, *dst_, *src_, ps, domain_, registry_, &rcInput);
-        auto const calcMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - tCalc);
-
-        if (rc.result() == xrpl::tesSUCCESS)
+        try
         {
-            json::Value jvEntry(json::ValueType::Object);
-            if (rc.actualAmountIn.holds<xrpl::Issue>())
-                rc.actualAmountIn.get<xrpl::Issue>().account = sourceAccount;
-            jvEntry[xrpl::jss::source_amount] =
-                rc.actualAmountIn.getJson(xrpl::JsonOptions::Values::None);
-            jvEntry[xrpl::jss::paths_computed] = ps.getJson(xrpl::JsonOptions::Values::None);
-            if (convertAll_)
+            xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
+            auto rc = xrpl::path::RippleCalc::rippleCalculate(
+                sandbox, saMaxAmount, dstAmount, *dst_, *src_, ps, domain_, registry_, &rcInput);
+            auto const calcMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tCalc);
+
+            if (rc.result() == xrpl::tesSUCCESS)
             {
-                jvEntry[xrpl::jss::destination_amount] =
-                    rc.actualAmountOut.getJson(xrpl::JsonOptions::Values::None);
+                json::Value jvEntry(json::ValueType::Object);
+                if (rc.actualAmountIn.holds<xrpl::Issue>())
+                    rc.actualAmountIn.get<xrpl::Issue>().account = sourceAccount;
+                jvEntry[xrpl::jss::source_amount] =
+                    rc.actualAmountIn.getJson(xrpl::JsonOptions::Values::None);
+                jvEntry[xrpl::jss::paths_computed] = ps.getJson(xrpl::JsonOptions::Values::None);
+                if (convertAll_)
+                {
+                    jvEntry[xrpl::jss::destination_amount] =
+                        rc.actualAmountOut.getJson(xrpl::JsonOptions::Values::None);
+                }
+                if (oneShot_)
+                    jvEntry[xrpl::jss::paths_canonical] = json::ValueType::Array;
+                // UI clients (swap PathFind) only read alternatives[0]. Keep
+                // computed hop lists ahead of default-path-only entries.
+                if (ps.empty())
+                    defaultOnly.push_back(std::move(jvEntry));
+                else
+                    withPaths.push_back(std::move(jvEntry));
             }
-            if (oneShot_)
-                jvEntry[xrpl::jss::paths_canonical] = json::ValueType::Array;
-            // UI clients (swap PathFind) only read alternatives[0]. Keep
-            // computed hop lists ahead of default-path-only entries.
-            if (ps.empty())
-                defaultOnly.push_back(std::move(jvEntry));
-            else
-                withPaths.push_back(std::move(jvEntry));
+            JLOG(journal_.info()) << "fast path_find final calc " << calcMs.count()
+                                  << "ms result=" << rc.result();
         }
-        JLOG(journal_.info()) << "fast path_find final calc " << calcMs.count() << "ms result="
-                              << rc.result();
+        catch (std::exception const& ex)
+        {
+            JLOG(journal_.warn()) << "fast path_find RippleCalc: " << ex.what();
+        }
     }
     for (auto& e : withPaths)
         jvArray.append(std::move(e));

@@ -170,6 +170,14 @@ public:
         }
         if (cmd == "path_find")
         {
+            if (!push)
+            {
+                auto err = xrpl::rpcError(xrpl::RpcInvalidParams);
+                err[xrpl::jss::error_message] =
+                    "path_find is WebSocket only; use ripple_path_find";
+                done(std::move(err));
+                return;
+            }
             engine_.pathFind(std::move(params), connId, std::move(push), std::move(done));
             return;
         }
@@ -197,6 +205,7 @@ public:
         }
         if (cmd == "subscribe" || cmd == "unsubscribe")
         {
+            // Never proxy subscribe/unsubscribe on the upstream sync socket.
             bool ledger = false;
             if (params.isMember(xrpl::jss::streams) && params[xrpl::jss::streams].isArray())
             {
@@ -208,19 +217,17 @@ public:
             }
             if (ledger)
             {
-                {
-                    std::lock_guard lock(ledgerSubMutex_);
-                    if (cmd == "subscribe")
-                        ledgerSubs_[connId] = push;
-                    else
-                        ledgerSubs_.erase(connId);
-                }
-                json::Value ack{json::ValueType::Object};
-                done(ack);
-                if (cmd == "subscribe" && push)
-                    push(engine_.ledgerClosedJson());
-                return;
+                std::lock_guard lock(ledgerSubMutex_);
+                if (cmd == "subscribe")
+                    ledgerSubs_[connId] = push;
+                else
+                    ledgerSubs_.erase(connId);
             }
+            json::Value ack{json::ValueType::Object};
+            done(ack);
+            if (cmd == "subscribe" && ledger && push)
+                push(engine_.ledgerClosedJson());
+            return;
         }
         if (cmd == "ledger_closed")
         {
@@ -238,6 +245,13 @@ public:
         {
             if (inner == "ripple_path_find")
                 engine_.ripplePathFind(std::move(params), std::move(done));
+            else if (!push)
+            {
+                auto err = xrpl::rpcError(xrpl::RpcInvalidParams);
+                err[xrpl::jss::error_message] =
+                    "path_find is WebSocket only; use ripple_path_find";
+                done(std::move(err));
+            }
             else
                 engine_.pathFind(std::move(params), connId, std::move(push), std::move(done));
             return;

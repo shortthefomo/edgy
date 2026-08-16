@@ -35,14 +35,73 @@ LocalOrderBooks::addBookUnlocked(xrpl::Book const& book)
 void
 LocalOrderBooks::noteQualityUnlocked(xrpl::Book const& book, std::uint64_t quality)
 {
-    auto [it, inserted] = tipQuality_.emplace(book, quality);
-    if (!inserted && quality < it->second)
-        it->second = quality;
-    auto const token = xrpl::PathAsset{book.in};
-    auto& byOut = tokenTip_[token];
-    auto [tit, tins] = byOut.emplace(book.out, quality);
-    if (!tins && quality < tit->second)
-        tit->second = quality;
+    setQualityUnlocked(book, quality);
+}
+
+void
+LocalOrderBooks::setQualityUnlocked(xrpl::Book const& book, std::uint64_t quality)
+{
+    tipQuality_[book] = quality;
+    tokenTip_[xrpl::PathAsset{book.in}][book.out] = quality;
+}
+
+void
+LocalOrderBooks::removeBookUnlocked(xrpl::Book const& book)
+{
+    if (book.domain)
+    {
+        if (auto it = domainBooks_.find({book.in, *book.domain}); it != domainBooks_.end())
+        {
+            it->second.erase(book.out);
+            if (it->second.empty())
+                domainBooks_.erase(it);
+        }
+        if (auto it = reverseDomainBooks_.find({book.out, *book.domain});
+            it != reverseDomainBooks_.end())
+        {
+            it->second.erase(book.in);
+            if (it->second.empty())
+                reverseDomainBooks_.erase(it);
+        }
+        if (xrpl::isXRP(book.out))
+            xrpDomainBooks_.erase({book.in, *book.domain});
+        tipQuality_.erase(book);
+        return;
+    }
+
+    if (auto it = allBooks_.find(book.in); it != allBooks_.end())
+    {
+        it->second.erase(book.out);
+        if (it->second.empty())
+            allBooks_.erase(it);
+    }
+    if (auto it = reverseBooks_.find(book.out); it != reverseBooks_.end())
+    {
+        it->second.erase(book.in);
+        if (it->second.empty())
+            reverseBooks_.erase(it);
+    }
+    if (auto it = tokenFwd_.find(xrpl::PathAsset{book.in}); it != tokenFwd_.end())
+    {
+        it->second.erase(book.out);
+        if (it->second.empty())
+            tokenFwd_.erase(it);
+    }
+    if (auto it = tokenRev_.find(xrpl::PathAsset{book.out}); it != tokenRev_.end())
+    {
+        it->second.erase(book.in);
+        if (it->second.empty())
+            tokenRev_.erase(it);
+    }
+    if (xrpl::isXRP(book.out))
+        xrpBooks_.erase(book.in);
+    tipQuality_.erase(book);
+    if (auto it = tokenTip_.find(xrpl::PathAsset{book.in}); it != tokenTip_.end())
+    {
+        it->second.erase(book.out);
+        if (it->second.empty())
+            tokenTip_.erase(it);
+    }
 }
 
 void
@@ -100,7 +159,7 @@ LocalOrderBooks::addFromSle(xrpl::SLE::const_ref sle)
             q = sle->getFieldU64(xrpl::sfExchangeRate);
         {
             std::lock_guard const lock(lock_);
-            noteQualityUnlocked(book, q);
+            setQualityUnlocked(book, q);
         }
         return;
     }
@@ -117,6 +176,80 @@ LocalOrderBooks::addFromSle(xrpl::SLE::const_ref sle)
         addOrderBook({asset1, asset2, std::nullopt});
         addOrderBook({asset2, asset1, std::nullopt});
     }
+}
+
+void
+LocalOrderBooks::removeFromSle(xrpl::SLE::const_ref sle)
+{
+    if (!sle)
+        return;
+
+    if (sle->getType() == xrpl::ltDIR_NODE && sle->isFieldPresent(xrpl::sfExchangeRate) &&
+        sle->isFieldPresent(xrpl::sfRootIndex) && sle->getFieldH256(xrpl::sfRootIndex) == sle->key())
+    {
+        xrpl::Book book;
+        if (sle->isFieldPresent(xrpl::sfTakerPaysCurrency))
+        {
+            xrpl::Issue issue;
+            issue.currency = sle->getFieldH160(xrpl::sfTakerPaysCurrency);
+            issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
+            book.in = issue;
+        }
+        else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
+        {
+            book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
+        }
+        else
+        {
+            return;
+        }
+        if (sle->isFieldPresent(xrpl::sfTakerGetsCurrency))
+        {
+            xrpl::Issue issue;
+            issue.currency = sle->getFieldH160(xrpl::sfTakerGetsCurrency);
+            issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
+            book.out = issue;
+        }
+        else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
+        {
+            book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
+        }
+        else
+        {
+            return;
+        }
+        book.domain = (*sle)[~xrpl::sfDomainID];
+        std::lock_guard const lock(lock_);
+        removeBookUnlocked(book);
+        return;
+    }
+
+    if (sle->getType() == xrpl::ltAMM)
+    {
+        if (!sle->isFieldPresent(xrpl::sfAsset) || !sle->isFieldPresent(xrpl::sfAsset2))
+            return;
+        auto const asset1 = (*sle)[xrpl::sfAsset];
+        auto const asset2 = (*sle)[xrpl::sfAsset2];
+        std::lock_guard const lock(lock_);
+        removeBookUnlocked({asset1, asset2, std::nullopt});
+        removeBookUnlocked({asset2, asset1, std::nullopt});
+    }
+}
+
+void
+LocalOrderBooks::clear()
+{
+    std::lock_guard const lock(lock_);
+    allBooks_.clear();
+    reverseBooks_.clear();
+    domainBooks_.clear();
+    reverseDomainBooks_.clear();
+    xrpBooks_.clear();
+    xrpDomainBooks_.clear();
+    tokenFwd_.clear();
+    tokenRev_.clear();
+    tipQuality_.clear();
+    tokenTip_.clear();
 }
 
 void

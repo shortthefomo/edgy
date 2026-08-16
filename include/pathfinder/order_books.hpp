@@ -53,6 +53,12 @@ public:
     void
     addFromSle(xrpl::SLE::const_ref sle);
 
+    void
+    removeFromSle(xrpl::SLE::const_ref sle);
+
+    void
+    clear();
+
     [[nodiscard]] bool
     hasBook(
         xrpl::Asset const& in,
@@ -89,6 +95,12 @@ private:
 
     void
     noteQualityUnlocked(xrpl::Book const& book, std::uint64_t quality);
+
+    void
+    setQualityUnlocked(xrpl::Book const& book, std::uint64_t quality);
+
+    void
+    removeBookUnlocked(xrpl::Book const& book);
 
     mutable std::mutex lock_;
     xrpl::hardened_hash_map<xrpl::Asset, xrpl::hardened_hash_set<xrpl::Asset>> allBooks_;

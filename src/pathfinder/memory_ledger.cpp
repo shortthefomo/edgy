@@ -146,12 +146,14 @@ MemoryLedger::MemoryLedger(
     xrpl::Fees fees,
     xrpl::Rules rules,
     std::shared_ptr<Base const> base,
-    std::shared_ptr<Overlay const> overlay)
+    std::shared_ptr<Overlay const> overlay,
+    bool open)
     : header_(header)
     , fees_(fees)
     , rules_(std::move(rules))
     , base_(std::move(base))
     , overlay_(std::move(overlay))
+    , open_(open)
 {
     if (!base_)
         base_ = std::make_shared<Base>();
@@ -168,7 +170,7 @@ MemoryLedger::header() const
 bool
 MemoryLedger::open() const
 {
-    return false;
+    return open_;
 }
 
 xrpl::Fees const&
@@ -211,26 +213,22 @@ MemoryLedger::firstKey() const
 xrpl::SLE::const_pointer
 MemoryLedger::materialize(xrpl::uint256 const& key, Item const& item) const
 {
+    std::mutex& mutex =
+        overlay_->contains(key) ? decodeMutex_ : base_->decodeMutex;
+    std::lock_guard const lock(mutex);
     if (item.sle)
         return item.sle;
 
-    xrpl::SLE::const_pointer sle;
     try
     {
         xrpl::SerialIter sit(xrpl::makeSlice(item.blob));
-        sle = std::make_shared<xrpl::SLE const>(sit, key);
+        item.sle = std::make_shared<xrpl::SLE const>(sit, key);
+        return item.sle;
     }
     catch (...)
     {
         return nullptr;
     }
-
-    std::mutex& mutex =
-        overlay_->contains(key) ? decodeMutex_ : base_->decodeMutex;
-    std::lock_guard const lock(mutex);
-    if (!item.sle)
-        item.sle = sle;
-    return item.sle;
 }
 
 xrpl::SLE::const_pointer
@@ -501,6 +499,7 @@ LedgerBuilder::clear()
     base_ = std::make_shared<MemoryLedger::Base>();
     overlay_ = std::make_shared<MemoryLedger::Overlay>();
     frozen_ = false;
+    open_ = false;
 }
 
 bool
@@ -554,10 +553,11 @@ LedgerBuilder::publish()
     freezeBase();
     std::shared_ptr<MemoryLedger::Base const> frozenBase = base_;
     std::shared_ptr<MemoryLedger::Overlay const> frozenOverlay = overlay_;
-    auto view =
-        std::make_shared<MemoryLedger>(header_, fees_, rules_, frozenBase, frozenOverlay);
+    auto view = std::make_shared<MemoryLedger>(
+        header_, fees_, rules_, frozenBase, frozenOverlay, open_);
     applyFeeAndRules(*view);
-    view = std::make_shared<MemoryLedger>(header_, fees_, rules_, frozenBase, frozenOverlay);
+    view = std::make_shared<MemoryLedger>(
+        header_, fees_, rules_, frozenBase, frozenOverlay, open_);
     return view;
 }
 
