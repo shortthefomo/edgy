@@ -1,4 +1,5 @@
 #include <edgy/server.hpp>
+#include <edgy/version.hpp>
 
 #include <xrpl/json/json_reader.h>
 #include <xrpl/json/to_string.h>
@@ -187,7 +188,7 @@ public:
             json::Value info{json::ValueType::Object};
             info["info"] = s;
             info["info"]["server_state"] = engine_.ready() ? "full" : "syncing";
-            info["info"]["build_version"] = "edgy";
+            info["info"]["build_version"] = edgy::versionString();
             done(std::move(info));
             return;
         }

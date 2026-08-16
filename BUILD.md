@@ -77,6 +77,8 @@ When this step is done you should have:
 
 Use the same `CMAKE_BUILD_TYPE` (Release or Debug) for Edgy as you passed to Conan and to rippled. Mixing them is the usual cause of missing protobuf headers and ABI errors.
 
+A **Release** binary is the optimized one you run against a live node. A **Debug** binary is for stepping in a debugger and is much slower. rippled uses the same split: Conan’s `build_type` and CMake’s `CMAKE_BUILD_TYPE` must both be `Release`.
+
 ### 2. Configure Edgy
 
 From the Edgy repository root:
@@ -152,6 +154,60 @@ cp cfg/edgy.example.cfg edgy.cfg
 ```
 
 Startup requires the upstream `server_state` to be `full`, `proposing`, or `unknown`. Wait for `snapshot ready` on stderr (or `path_info.info.server_state = full`) before sending `path_find`.
+
+## Release build
+
+This is the rippled-shaped path: Conan `Release` + CMake `Release`, then an identifiable binary.
+
+### Optimized binary (what you run)
+
+1. Build rippled as Release (step 1 above, `build_type=Release`).
+2. Configure and build Edgy as Release (steps 2–3). The commands already pass `-DCMAKE_BUILD_TYPE=Release`.
+3. Check it:
+
+```bash
+.build/edgy --version
+# edgy 0.1.0-b0+<git>
+```
+
+A Debug Edgy prints `+DEBUG` in the version (same idea as `xrpld --version`). Do not mix a Release Edgy with a Debug `libxrpl.a`.
+
+Install like rippled’s `cmake --install`:
+
+```bash
+cmake --install .build --prefix /usr/local
+# /usr/local/bin/edgy
+# /usr/local/etc/edgy/edgy.cfg   (from cfg/edgy.example.cfg)
+```
+
+On a multi-config generator (Visual Studio / Xcode):
+
+```bash
+cmake --build .build --config Release --parallel --target edgy
+cmake --install .build --config Release --prefix /usr/local
+```
+
+### Tagged product release (later)
+
+rippled also has a *product* release: bump `versionString` in `BuildInfo.cpp`, tag `3.2.0`, push, GitHub Release, then CI builds `.deb` / `.rpm`. Edgy should follow a smaller copy of that, not the packaging farm:
+
+| rippled | Edgy |
+| --- | --- |
+| Work on `develop` | Same |
+| `versionString = "X.Y.Z-bN"` on develop | `kVersionBase` in `include/edgy/version.hpp` |
+| Signed commit “Set version to X.Y.Z” | Same, edit `kVersionBase` and `project(edgy VERSION …)` |
+| Tag `X.Y.Z`, GitHub Release | Tag `vX.Y.Z`, attach `.build/edgy` (and optionally a tarball) |
+| `package/` deb/rpm + `on-tag.yml` | Skip until there is more than one installer |
+
+Until the first tag, develop stays on `0.1.0-b0`. To cut `0.1.0`:
+
+```bash
+# 1. set kVersionBase to "0.1.0" and project(edgy VERSION 0.1.0)
+# 2. signed commit: Set version to 0.1.0
+# 3. cmake Release rebuild, run edgy_tests, .build/edgy --version
+# 4. git tag -s v0.1.0 -m "edgy 0.1.0"
+# 5. git push origin develop --tags
+```
 
 ## CMake options
 

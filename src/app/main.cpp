@@ -2,6 +2,7 @@
 #include <edgy/engine.hpp>
 #include <edgy/node_client.hpp>
 #include <edgy/server.hpp>
+#include <edgy/version.hpp>
 
 #include <xrpl/basics/Log.h>
 
@@ -198,7 +199,7 @@ main(int argc, char** argv)
             io.stop();
         });
 
-        std::cerr << "Edgy local path_find sidecar\n";
+        std::cerr << "Edgy " << edgy::versionString() << " local path_find sidecar\n";
         if (!cfg.configPath.empty())
             std::cerr << "  config    " << cfg.configPath << '\n';
         std::cerr << "  upstream  " << cfg.nodeWs << '\n'
