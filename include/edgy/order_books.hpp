@@ -16,7 +16,7 @@
 #include <optional>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 
 /**
  * In-memory OrderBookDB matching xrpld's OrderBookDBImpl lookup semantics.
@@ -119,4 +119,4 @@ private:
         tokenTip_;
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

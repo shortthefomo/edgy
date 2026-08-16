@@ -1,4 +1,4 @@
-#include <pathfinder/memory_ledger.hpp>
+#include <edgy/memory_ledger.hpp>
 
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <utility>
 
-namespace pathfinder {
+namespace edgy {
 namespace {
 
 bool
@@ -561,4 +561,4 @@ LedgerBuilder::publish()
     return view;
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

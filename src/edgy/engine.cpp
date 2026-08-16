@@ -1,12 +1,13 @@
-#include <pathfinder/engine.hpp>
+#include <edgy/engine.hpp>
 
-#include <pathfinder/thread_pool.hpp>
+#include <edgy/thread_pool.hpp>
 
 #include <xrpld/rpc/detail/Pathfinder.h>
 #include <xrpld/rpc/detail/Tuning.h>
 
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/StringUtilities.h>
+#include <xrpl/beast/utility/Zero.h>
 #include <xrpl/json/json_value.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/RPCErr.h>
@@ -19,12 +20,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 namespace {
 
 xrpl::SLE::pointer
@@ -76,7 +78,16 @@ sleFromMetaNode(xrpl::STObject const& node, xrpl::STObject const& inner, xrpl::u
     return std::make_shared<xrpl::SLE>(fields, key);
 }
 
-bool
+enum class MetaApply : std::uint8_t
+{
+    None,
+    Created,
+    Modified,
+    Deleted,
+    Incomplete,
+};
+
+MetaApply
 applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject const& node)
 {
     try
@@ -89,10 +100,10 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
         else if (fname == xrpl::sfModifiedNode)
             innerField = &xrpl::sfFinalFields;
         else if (!deleted)
-            return false;
+            return MetaApply::None;
 
         if (!node.isFieldPresent(xrpl::sfLedgerIndex))
-            return false;
+            return MetaApply::None;
         auto const key = node.getFieldH256(xrpl::sfLedgerIndex);
         if (deleted)
         {
@@ -103,26 +114,26 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
                 books.removeFromSle(sleFromMetaNode(node, inner, key));
             }
             builder.erase(key);
-            return true;
+            return MetaApply::Deleted;
         }
         if (!innerField || !node.isFieldPresent(*innerField))
-            return false;
+            return MetaApply::None;
         auto const& inner = dynamic_cast<xrpl::STObject const&>(node.peekAtField(*innerField));
         auto sle = sleFromMetaNode(node, inner, key);
         if (!offerComplete(*sle))
         {
             books.removeFromSle(sle);
             builder.erase(key);
-            return true;
+            return MetaApply::Incomplete;
         }
         books.addFromSle(sle);
         builder.upsert(std::move(sle));
-        return true;
+        return fname == xrpl::sfCreatedNode ? MetaApply::Created : MetaApply::Modified;
     }
     catch (std::exception const& ex)
     {
         std::cerr << "applyMetaNode: " << ex.what() << '\n';
-        return false;
+        return MetaApply::None;
     }
 }
 
@@ -174,6 +185,35 @@ fillHeaderFromLedgerJson(xrpl::LedgerHeader& header, json::Value const& ledger)
         header.drops = xrpl::XRPAmount{std::stoll(ledger["total_coins"].asString())};
     header.validated = true;
     header.accepted = true;
+}
+
+std::uint32_t
+msgTxnCount(json::Value const& msg)
+{
+    if (!msg.isMember(xrpl::jss::txn_count))
+        return 0;
+    auto const& v = msg[xrpl::jss::txn_count];
+    if (v.isIntegral())
+        return v.asUInt();
+    if (v.isString())
+    {
+        try
+        {
+            return static_cast<std::uint32_t>(std::stoul(v.asString()));
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+std::string
+shortHash(xrpl::uint256 const& hash)
+{
+    auto const s = to_string(hash);
+    return s.size() > 12 ? s.substr(0, 12) : s;
 }
 
 }  // namespace
@@ -345,7 +385,7 @@ Engine::pathCountsJson() const
         applyQ = applyQueue_.size();
     }
 
-    j["source"] = "pathfinder";
+    j["source"] = "edgy";
     j["server_state"] = ready_.load() ? "full" : "syncing";
     j["uptime"] = uptime;
     j["load_factor"] = 1;
@@ -565,8 +605,18 @@ Engine::syncLoop()
             needResync_.store(false);
             ready_.store(true);
             applyCv_.notify_all();
-            std::cerr << "snapshot ready (" << objects_.load()
-                      << " objects); serving local path_find\n";
+            if (auto view = ledger())
+            {
+                std::cerr << "sync ready ledger " << view->seq() << " "
+                          << shortHash(view->header().hash) << " objects=" << objects_.load()
+                          << " books=" << services_.books().bookCount()
+                          << "; following node closes\n";
+            }
+            else
+            {
+                std::cerr << "snapshot ready (" << objects_.load()
+                          << " objects); serving local path_find\n";
+            }
             JLOG(j.info()) << "snapshot ready; serving local path_find";
 
             while (!stop_.load())
@@ -626,6 +676,7 @@ void
 Engine::loadSnapshot()
 {
     services_.books().clear();
+    resetApplyStats();
     {
         std::lock_guard lock(stateMutex_);
         cache_.reset();
@@ -773,19 +824,95 @@ Engine::publishBuilder(bool rebuildBooks)
 }
 
 void
+Engine::resetApplyStats()
+{
+    applyTxs_ = 0;
+    applyNoMeta_ = 0;
+    applyCreated_ = 0;
+    applyDeleted_ = 0;
+    applyModified_ = 0;
+    applyIncomplete_ = 0;
+}
+
+void
+Engine::logSync(char const* what, xrpl::LedgerHeader const& header, json::Value const& nodeMsg)
+{
+    std::size_t objects = builder_.size();
+    std::size_t overlay = 0;
+    {
+        std::lock_guard lock(stateMutex_);
+        if (published_)
+        {
+            objects = published_->size();
+            overlay = published_->overlaySize();
+        }
+    }
+    auto const books = services_.books().bookCount();
+    auto const nodeSeq = msgLedgerIndex(nodeMsg);
+    auto const nodeTxs = msgTxnCount(nodeMsg);
+    bool const txOk = nodeTxs == 0 || (applyTxs_ + applyNoMeta_) == nodeTxs;
+    bool const seqOk = nodeSeq == 0 || nodeSeq == header.seq;
+
+    std::cerr << "sync " << what << " ledger " << header.seq << " " << shortHash(header.hash)
+              << " objects=" << objects << " overlay=" << overlay << " books=" << books
+              << " txs=" << applyTxs_;
+    if (nodeTxs != 0)
+        std::cerr << "/" << nodeTxs;
+    if (applyNoMeta_ != 0)
+        std::cerr << " no_meta=" << applyNoMeta_;
+    std::cerr << " created=" << applyCreated_ << " deleted=" << applyDeleted_
+              << " modified=" << applyModified_;
+    if (applyIncomplete_ != 0)
+        std::cerr << " incomplete=" << applyIncomplete_;
+    if (seqOk && txOk)
+        std::cerr << " inline with node";
+    else
+    {
+        std::cerr << " WARNING";
+        if (!seqOk)
+            std::cerr << " seq!=" << nodeSeq;
+        if (!txOk)
+            std::cerr << " txs!=" << nodeTxs;
+    }
+    std::cerr << '\n';
+}
+
+void
 Engine::applyLedgerClosed(json::Value const& msg)
 {
     if (!ready_.load())
         return;
-    if (auto const seq = msgLedgerIndex(msg); seq != 0 && seq <= currentSeq_.load())
+    auto const seq = msgLedgerIndex(msg);
+    auto const prevSeq = currentSeq_.load();
+    if (seq != 0 && seq <= prevSeq)
         return;
-    xrpl::LedgerHeader header = builder_.header();
+    if (seq != 0 && prevSeq != 0 && seq > prevSeq + 1)
+    {
+        std::cerr << "sync WARNING skipped ledgers " << (prevSeq + 1) << "-" << (seq - 1)
+                  << " (have " << prevSeq << ", node closed " << seq
+                  << "); objects may drift — resnapshot\n";
+        needResync_.store(true);
+        applyCv_.notify_all();
+    }
+    xrpl::LedgerHeader prev = builder_.header();
+    xrpl::LedgerHeader header = prev;
     fillHeaderFromLedgerJson(header, msg);
+    if (prev.seq != 0 && prev.hash != beast::kZero && header.parentHash != beast::kZero &&
+        header.parentHash != prev.hash)
+    {
+        std::cerr << "sync WARNING parent " << shortHash(header.parentHash)
+                  << " != local " << shortHash(prev.hash) << " at ledger " << header.seq
+                  << "; objects not chained to the node\n";
+        needResync_.store(true);
+        applyCv_.notify_all();
+    }
     builder_.setHeader(header);
     builder_.setOpen(false);
     currentSeq_.store(header.seq);
     publishBuilder(false);
     dirty_.store(false, std::memory_order_release);
+    logSync("closed", header, msg);
+    resetApplyStats();
     if (auto cache = cache_)
         cache->expandIncompleteLines();
     json::Value closed;
@@ -830,21 +957,51 @@ Engine::applyTransaction(json::Value const& msg)
     else if (msg.isMember("meta_blob") && msg["meta_blob"].isString())
         hex = msg["meta_blob"].asString();
     if (hex.empty())
+    {
+        ++applyNoMeta_;
         return;
+    }
     auto const blob = xrpl::strUnHex(hex);
     if (!blob)
+    {
+        ++applyNoMeta_;
         return;
+    }
     try
     {
         xrpl::TxMeta meta(xrpl::uint256{}, 0, *blob);
         bool any = false;
         for (auto const& node : meta.getNodes())
-            any = applyMetaNode(builder_, services_.books(), node) || any;
+        {
+            switch (applyMetaNode(builder_, services_.books(), node))
+            {
+                case MetaApply::Created:
+                    ++applyCreated_;
+                    any = true;
+                    break;
+                case MetaApply::Modified:
+                    ++applyModified_;
+                    any = true;
+                    break;
+                case MetaApply::Deleted:
+                    ++applyDeleted_;
+                    any = true;
+                    break;
+                case MetaApply::Incomplete:
+                    ++applyIncomplete_;
+                    any = true;
+                    break;
+                case MetaApply::None:
+                    break;
+            }
+        }
+        ++applyTxs_;
         if (any)
             dirty_.store(true, std::memory_order_release);
     }
     catch (std::exception const& ex)
     {
+        ++applyNoMeta_;
         std::cerr << "applyTransaction: " << ex.what() << '\n';
     }
 }
@@ -1162,4 +1319,4 @@ Engine::dropConnection(int connId)
     forgetConnSessions(connId, cache);
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

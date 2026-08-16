@@ -1,4 +1,4 @@
-#include <pathfinder/node_client.hpp>
+#include <edgy/node_client.hpp>
 
 #include <xrpl/json/json_reader.h>
 #include <xrpl/json/to_string.h>
@@ -24,7 +24,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace pathfinder {
+namespace edgy {
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
@@ -515,4 +515,4 @@ NodeClient::onDisconnect(std::function<void(std::string const&)> handler)
     impl_->onDisconnect(std::move(handler));
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

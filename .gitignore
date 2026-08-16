@@ -5,3 +5,8 @@ compile_commands.json
 *.o
 *.a
 .DS_Store
+edgy.cfg
+cfg/edgy.cfg
+pathfinder.cfg
+cfg/pathfinder.cfg
+

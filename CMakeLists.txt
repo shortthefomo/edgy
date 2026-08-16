@@ -8,7 +8,7 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(pathfinder LANGUAGES CXX)
+project(edgy LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,15 +52,15 @@ set_target_properties(
     PROPERTIES IMPORTED_LOCATION "${RIPPLED_BUILD}/libxrpl.a"
 )
 
-add_library(pathfinder_core STATIC
-    src/pathfinder/config.cpp
-    src/pathfinder/memory_ledger.cpp
-    src/pathfinder/graph.cpp
-    src/pathfinder/order_books.cpp
-    src/pathfinder/node_client.cpp
-    src/pathfinder/session.cpp
-    src/pathfinder/engine.cpp
-    src/pathfinder/server.cpp
+add_library(edgy_core STATIC
+    src/edgy/config.cpp
+    src/edgy/memory_ledger.cpp
+    src/edgy/graph.cpp
+    src/edgy/order_books.cpp
+    src/edgy/node_client.cpp
+    src/edgy/session.cpp
+    src/edgy/engine.cpp
+    src/edgy/server.cpp
     src/vendor/path/Pathfinder.cpp
     src/vendor/path/AssetCache.cpp
     src/vendor/path/TrustLine.cpp
@@ -68,7 +68,7 @@ add_library(pathfinder_core STATIC
 )
 
 target_include_directories(
-    pathfinder_core
+    edgy_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${RIPPLED_ROOT}/include
@@ -77,11 +77,11 @@ target_include_directories(
 
 file(GLOB _xrpl_module_dirs "${RIPPLED_BUILD}/modules/xrpl.libxrpl.*")
 foreach(_dir IN LISTS _xrpl_module_dirs)
-    target_include_directories(pathfinder_core PUBLIC ${_dir})
+    target_include_directories(edgy_core PUBLIC ${_dir})
 endforeach()
 
 target_compile_definitions(
-    pathfinder_core
+    edgy_core
     PUBLIC
         BOOST_ASIO_DISABLE_HANDLER_TYPE_REQUIREMENTS
         BOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT
@@ -90,7 +90,7 @@ target_compile_definitions(
 )
 
 target_link_libraries(
-    pathfinder_core
+    edgy_core
     PUBLIC
         xrpl_lib
         boost::boost
@@ -109,14 +109,14 @@ target_link_libraries(
 )
 
 if(APPLE)
-    target_link_libraries(pathfinder_core PUBLIC "-framework CoreFoundation")
+    target_link_libraries(edgy_core PUBLIC "-framework CoreFoundation")
 endif()
 
-add_executable(pathfinder src/app/main.cpp)
-target_link_libraries(pathfinder PRIVATE pathfinder_core)
+add_executable(edgy src/app/main.cpp)
+target_link_libraries(edgy PRIVATE edgy_core)
 
-add_executable(pathfinder_tests tests/pathfinder_tests.cpp)
-target_link_libraries(pathfinder_tests PRIVATE pathfinder_core)
+add_executable(edgy_tests tests/edgy_tests.cpp)
+target_link_libraries(edgy_tests PRIVATE edgy_core)
 
 enable_testing()
-add_test(NAME pathfinder_tests COMMAND pathfinder_tests)
+add_test(NAME edgy_tests COMMAND edgy_tests)

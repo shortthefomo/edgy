@@ -1,8 +1,8 @@
 #pragma once
 
-#include <pathfinder/config.hpp>
-#include <pathfinder/engine.hpp>
-#include <pathfinder/node_client.hpp>
+#include <edgy/config.hpp>
+#include <edgy/engine.hpp>
+#include <edgy/node_client.hpp>
 
 #include <boost/asio/io_context.hpp>
 
@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 
 /**
  * HTTP JSON-RPC + WebSocket front end.
@@ -38,4 +38,4 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

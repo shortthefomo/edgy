@@ -1,4 +1,4 @@
-#include <pathfinder/order_books.hpp>
+#include <edgy/order_books.hpp>
 
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <utility>
 
-namespace pathfinder {
+namespace edgy {
 
 void
 LocalOrderBooks::addBookUnlocked(xrpl::Book const& book)
@@ -530,4 +530,4 @@ LocalOrderBooks::bookCount() const
     return tipQuality_.size();
 }
 
-}  // namespace pathfinder
+}  // namespace edgy

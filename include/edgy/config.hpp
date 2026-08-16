@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace pathfinder {
+namespace edgy {
 
 struct Config
 {
@@ -42,4 +42,4 @@ struct Config
     fromArgs(int argc, char** argv);
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

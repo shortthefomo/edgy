@@ -13,7 +13,7 @@
 #include <memory>
 #include <optional>
 
-namespace pathfinder {
+namespace edgy {
 
 class LocalOrderBooks;
 
@@ -95,4 +95,4 @@ public:
         std::function<bool()> const& continueCallback);
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

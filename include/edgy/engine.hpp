@@ -1,10 +1,10 @@
 #pragma once
 
-#include <pathfinder/config.hpp>
-#include <pathfinder/memory_ledger.hpp>
-#include <pathfinder/node_client.hpp>
-#include <pathfinder/services.hpp>
-#include <pathfinder/session.hpp>
+#include <edgy/config.hpp>
+#include <edgy/memory_ledger.hpp>
+#include <edgy/node_client.hpp>
+#include <edgy/services.hpp>
+#include <edgy/session.hpp>
 
 #include <xrpld/rpc/detail/AssetCache.h>
 
@@ -24,7 +24,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 
 class ThreadPool;
 
@@ -178,6 +178,20 @@ private:
     std::atomic<bool> needResync_{false};
     std::atomic<bool> applyIdle_{true};
     std::chrono::steady_clock::time_point lastTick_{};
+
+    // Apply-thread only. Reset after each closed ledger / snapshot.
+    std::uint64_t applyTxs_{0};
+    std::uint64_t applyNoMeta_{0};
+    std::uint64_t applyCreated_{0};
+    std::uint64_t applyDeleted_{0};
+    std::uint64_t applyModified_{0};
+    std::uint64_t applyIncomplete_{0};
+
+    void
+    resetApplyStats();
+
+    void
+    logSync(char const* what, xrpl::LedgerHeader const& header, json::Value const& nodeMsg);
 };
 
-}  // namespace pathfinder
+}  // namespace edgy

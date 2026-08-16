@@ -1,4 +1,4 @@
-#include <pathfinder/config.hpp>
+#include <edgy/config.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -11,14 +11,14 @@
 #include <utility>
 #include <vector>
 
-namespace pathfinder {
+namespace edgy {
 namespace {
 
 void
 usage()
 {
     std::cerr
-        << "Usage: pathfinder [options] [pathfinder.cfg]\n"
+        << "Usage: edgy [options] [edgy.cfg]\n"
         << "  --conf <file>               xrpld-style config (stanzas)\n"
         << "  --node <ws://host:port>     Upstream xrpld WebSocket\n"
         << "  --listen-ws <host:port>     Local WebSocket\n"
@@ -356,7 +356,12 @@ Config::fromArgs(int argc, char** argv)
 
     if (confPath.empty())
     {
-        for (char const* candidate : {"pathfinder.cfg", "cfg/pathfinder.cfg"})
+        for (char const* candidate : {
+                 "edgy.cfg",
+                 "cfg/edgy.cfg",
+                 "pathfinder.cfg",
+                 "cfg/pathfinder.cfg",
+             })
         {
             std::ifstream probe(candidate);
             if (probe)
@@ -370,7 +375,9 @@ Config::fromArgs(int argc, char** argv)
     if (!confPath.empty())
         loadConfigFile(cfg, confPath);
 
-    if (auto const* env = std::getenv("PATHFINDER_NODE"))
+    if (auto const* env = std::getenv("EDGY_NODE"))
+        cfg.nodeWs = env;
+    else if (auto const* env = std::getenv("PATHFINDER_NODE"))
         cfg.nodeWs = env;
 
     for (auto const& [section, value] : cli)
@@ -380,4 +387,4 @@ Config::fromArgs(int argc, char** argv)
     return cfg;
 }
 
-}  // namespace pathfinder
+}  // namespace edgy
