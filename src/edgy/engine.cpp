@@ -519,6 +519,7 @@ Engine::applyLoop()
     for (;;)
     {
         std::vector<ApplyItem> batch;
+        ApplyCyclePlan plan;
         {
             std::unique_lock lock(applyMutex_);
             applyIdle_.store(true);
@@ -526,17 +527,21 @@ Engine::applyLoop()
             applyCv_.wait_for(lock, cfg_.midCloseDelay, [this] {
                 return stop_.load() || (ready_.load() && !applyQueue_.empty());
             });
-            if (stop_.load() && applyQueue_.empty())
+            plan = planApplyCycle(stop_.load(), ready_.load(), applyQueue_.empty());
+            if (plan.exit)
                 return;
-            if (!ready_.load() || applyQueue_.empty())
+            if (plan.hold)
                 continue;
-            applyIdle_.store(false);
-            while (!applyQueue_.empty())
+            if (plan.takeBatch)
             {
-                batch.push_back(std::move(applyQueue_.front()));
-                applyQueue_.pop();
-                if (batch.size() >= 256)
-                    break;
+                applyIdle_.store(false);
+                while (!applyQueue_.empty())
+                {
+                    batch.push_back(std::move(applyQueue_.front()));
+                    applyQueue_.pop();
+                    if (batch.size() >= 256)
+                        break;
+                }
             }
         }
         try
@@ -555,7 +560,7 @@ Engine::applyLoop()
         }
 
         auto const now = std::chrono::steady_clock::now();
-        if (!stop_.load() && ready_.load() && now - lastTick_ >= cfg_.midCloseDelay)
+        if (plan.tick && ready_.load() && now - lastTick_ >= cfg_.midCloseDelay)
         {
             lastTick_ = now;
             try
