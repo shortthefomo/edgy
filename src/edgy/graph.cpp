@@ -510,7 +510,7 @@ FastPathFinder::search(
 {
     FastPathResult result;
     result.depth = budget.depth;
-    result.isolateRank = convertAll;
+    result.isolateRank = true;
     auto const t0 = std::chrono::steady_clock::now();
     auto j = services.getJournal("FastPath");
 
@@ -535,15 +535,26 @@ FastPathFinder::search(
         ? 0.0
         : destNeeded / static_cast<double>(std::max(1, xrpl::rpc::tuning::kPathFindMaxPaths + 2));
 
-    std::vector<PathScore> scored;
-    scored.reserve(static_cast<std::size_t>(budget.twoHop) + 16);
+    // 1–2 hop books must stay ahead of 3–8 hop meets. A global quality
+    // sort let optimistic 4-hop dust tips bury RLUSD→USD→XRP and then
+    // the session Flow of those six junk paths returned alts=0.
+    std::vector<PathScore> shortHops;
+    std::vector<PathScore> longHops;
+    shortHops.reserve(static_cast<std::size_t>(budget.twoHop) + 8);
+    longHops.reserve(static_cast<std::size_t>(budget.twoHop) + 8);
 
     auto consider = [&](std::vector<xrpl::Asset> hops) {
         if (continueCallback && !continueCallback())
             return;
+        auto const n = hops.size();
         if (auto s = scoreHops(
                 books, ledger, srcAsset, dstAsset, std::move(hops), domain, destNeeded, bound))
-            scored.push_back(std::move(*s));
+        {
+            if (n <= 2)
+                shortHops.push_back(std::move(*s));
+            else
+                longHops.push_back(std::move(*s));
+        }
     };
 
     if (books.hasBook(srcAsset, dstAsset, domain))
@@ -755,13 +766,20 @@ FastPathFinder::search(
         consider(hopsFromPath(path));
     }
 
-    std::ranges::sort(scored, [&](PathScore const& a, PathScore const& b) {
-        return betterScore(a, b, convertAll, minUseful);
-    });
+    auto takeBest = [&](std::vector<PathScore>& v) {
+        std::ranges::sort(v, [&](PathScore const& a, PathScore const& b) {
+            return betterScore(a, b, convertAll, minUseful);
+        });
+        if (static_cast<int>(v.size()) > budget.twoHop)
+            v.resize(static_cast<std::size_t>(budget.twoHop));
+    };
+    takeBest(shortHops);
+    takeBest(longHops);
 
-    // Keep the best twoHop (plus extras already merged) as the candidate pool.
-    if (static_cast<int>(scored.size()) > budget.twoHop)
-        scored.resize(static_cast<std::size_t>(budget.twoHop));
+    std::vector<PathScore> scored;
+    scored.reserve(shortHops.size() + longHops.size());
+    scored.insert(scored.end(), shortHops.begin(), shortHops.end());
+    scored.insert(scored.end(), longHops.begin(), longHops.end());
 
     xrpl::STPathSet candidates;
     for (auto const& s : scored)
@@ -815,67 +833,62 @@ FastPathFinder::search(
             .fromCalc = false});
     };
 
-    if (result.isolateRank)
+    ranks.reserve(static_cast<std::size_t>(std::max(limit, SearchBudget::kMaxPathCount)));
+    int attempts = 0;
+    int successes = 0;
+    int const need = SearchBudget::kMaxPathCount;
+    int const attemptCap = std::min(
+        static_cast<int>(candidates.size()), std::max(budget.twoHop, budget.rank));
+    for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
     {
-        ranks.reserve(static_cast<std::size_t>(limit));
-        int ranked = 0;
-        for (int i = 0; i < static_cast<int>(candidates.size()) && ranked < limit; ++i)
+        if (continueCallback && !continueCallback())
+            break;
+        auto const& path = candidates[static_cast<std::size_t>(i)];
+        if (path.size() > SearchBudget::kMaxPathLength)
+            continue;
+        bool const longHop = path.size() > 2;
+        // Have six working 2-hops and already priced `rank` of them:
+        // do not spend calcs on longer speculative hops.
+        if (successes >= need && (longHop || attempts >= budget.rank))
+            break;
+        if (attempts >= attemptCap)
+            break;
+        auto const sig = hopCurrencyKey(path);
+        if (!rankedKeys.insert(sig).second)
+            continue;
+        ++attempts;
+        xrpl::STPathSet one;
+        pathSetPushAlways(one, path);
+
+        xrpl::path::RippleCalc::Input rcInput;
+        rcInput.defaultPathsAllowed = false;
+        rcInput.partialPaymentAllowed = true;
+
+        try
         {
-            if (continueCallback && !continueCallback())
-                break;
-            auto const& path = candidates[static_cast<std::size_t>(i)];
-            if (path.size() > SearchBudget::kMaxPathLength)
+            xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
+            auto rc = rippleCalculate(
+                sandbox, saMax, saMinDst, dst, src, one, domain, services, &rcInput);
+            if (!xrpl::isTesSuccess(rc.result()))
                 continue;
-            auto const sig = hopCurrencyKey(path);
-            if (!rankedKeys.insert(sig).second)
-                continue;
-            ++ranked;
-            xrpl::STPathSet one;
-            pathSetPushAlways(one, path);
 
-            xrpl::path::RippleCalc::Input rcInput;
-            rcInput.defaultPathsAllowed = false;
-            rcInput.partialPaymentAllowed = true;
-
-            try
-            {
-                xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-                auto rc = rippleCalculate(
-                    sandbox, saMax, saMinDst, dst, src, one, domain, services, &rcInput);
-                if (!xrpl::isTesSuccess(rc.result()))
-                    continue;
-
-                ranks.push_back(Rank{
-                    .quality = xrpl::Quality{xrpl::getRate(rc.actualAmountOut, rc.actualAmountIn)},
-                    .liquidity = rc.actualAmountOut,
-                    .length = path.size(),
-                    .index = i,
-                    .fromCalc = true});
-            }
-            catch (std::exception const& ex)
-            {
-                JLOG(j.debug()) << "fast path rank exception: " << ex.what();
-            }
+            ++successes;
+            ranks.push_back(Rank{
+                .quality = xrpl::Quality{xrpl::getRate(rc.actualAmountOut, rc.actualAmountIn)},
+                .liquidity = rc.actualAmountOut,
+                .length = path.size(),
+                .index = i,
+                .fromCalc = true});
         }
-        if (ranks.empty())
+        catch (std::exception const& ex)
         {
-            rankedKeys.clear();
-            for (int i = 0; i < static_cast<int>(candidates.size()) &&
-                 static_cast<int>(ranks.size()) < limit;
-                 ++i)
-            {
-                auto const& path = candidates[static_cast<std::size_t>(i)];
-                if (path.size() > SearchBudget::kMaxPathLength)
-                    continue;
-                if (!rankedKeys.insert(hopCurrencyKey(path)).second)
-                    continue;
-                pushCheap(i, path);
-            }
+            JLOG(j.debug()) << "fast path rank exception: " << ex.what();
         }
     }
-    else
+    // Empty / no-liquidity ledgers (unit tests) still need the cheap order.
+    if (ranks.empty())
     {
-        ranks.reserve(static_cast<std::size_t>(limit));
+        rankedKeys.clear();
         for (int i = 0; i < static_cast<int>(candidates.size()) &&
              static_cast<int>(ranks.size()) < limit;
              ++i)

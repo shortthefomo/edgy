@@ -78,8 +78,9 @@ struct FastPathResult
 /**
  * Book/AMM graph search. Scores every 1- and 2-hop pair (and a
  * bidirectional 3/4-hop meet) from composed tip/AMM quality and tip
- * size, then RippleCalcs only convert-all shortlists. Fixed-amount
- * requests return the cheap shortlist for one set Flow.
+ * size. 1–2 hop pairs stay in front of longer hops so speculative
+ * 4-hop tips cannot hide the books xrpld returns. RippleCalc filters
+ * the shortlist; only tesSUCCESS paths are returned.
  */
 class FastPathFinder
 {

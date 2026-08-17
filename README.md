@@ -29,8 +29,8 @@ Not xrpld’s Pathfinder table (level 1–10). Search is a local book graph:
 
 1. **Scan** every 1-hop and 2-hop book pair (full set intersection). 3-hop via the native asset, then a 4-hop meet-in-the-middle, then a capped BFS up to 8 hops.
 2. **Score** each candidate from *composed* tip/AMM quality (decoded `ExchangeRate` / AMM spot, not added packed `uint64`s) and tip size. Convert-all ranks by estimated width; a fixed dest penalizes tips that cannot cover `dest/(maxPaths+2)` and drops hops already worse than `send_max/dest`.
-3. **Keep** the best ~8–12 unique hop lists (max **6** returned). Fixed-amount requests skip per-path RippleCalc — the session runs **one** Flow on the set. Convert-all still RippleCalcs the shortlist to measure width.
-4. Longer hops fill leftover slots as a live WebSocket ages.
+3. **RippleCalc** 1–2 hop pairs first until six paths succeed (or the 2-hop list is exhausted). Longer hops only fill leftover slots. The session then Flows that validated set.
+4. A live WebSocket still deepens hop width as it ages.
 
 HTTP `ripple_path_find` is one mid-depth shot. WebSocket `path_find` starts shallow (fast first reply) and deepens while the socket stays open (about 4s / 12s / 25s / 50s, staggered per session).
 

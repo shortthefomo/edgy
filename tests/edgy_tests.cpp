@@ -1178,7 +1178,7 @@ main()
         expect(found.paths.empty(), "empty book graph yields no paths");
         expect(found.candidates == 0, "empty book graph has no candidates");
         expect(found.depth == 0, "empty search reports the requested depth");
-        expect(!found.isolateRank, "fixed dest does not isolate-rank");
+        expect(found.isolateRank, "fixed dest isolate-ranks the shortlist");
     }
 
     {
@@ -1243,9 +1243,9 @@ main()
             false,
             SearchBudget::forDepth(0),
             {});
-        expect(!found.isolateRank, "fixed-amount depth 0 skips isolate RippleCalc");
+        expect(found.isolateRank, "fixed-amount still isolate-ranks the shortlist");
         expect(found.candidates > 0, "2-hop graph yields candidates");
-        expect(!found.paths.empty(), "cheap score returns paths without isolate calc");
+        expect(!found.paths.empty(), "empty ledger falls back to cheap-scored 2-hop order");
         bool sawBest = false;
         if (!found.paths.empty())
         {
@@ -1257,6 +1257,84 @@ main()
             }
         }
         expect(sawBest, "best tip 2-hop is kept among many worse mids");
+    }
+
+    {
+        // 3-hop dust tips must not bury a worse-but-real 2-hop pair.
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue eur{xrpl::toCurrency("EUR"), gw};
+        xrpl::Issue mid{xrpl::toCurrency("MID"), gw};
+        xrpl::Issue dust{xrpl::toCurrency("DST"), gw};
+        xrpl::Issue xrp = xrpl::xrpIssue();
+
+        auto addDir = [&](xrpl::Issue const& in, xrpl::Issue const& out, std::uint64_t inAmt, std::uint64_t outAmt, int n) {
+            xrpl::uint256 key;
+            std::string hex(64, 'E');
+            hex[62] = "0123456789ABCDEF"[static_cast<unsigned>(n) % 16];
+            hex[63] = "0123456789ABCDEF"[static_cast<unsigned>(n / 16) % 16];
+            (void)key.parseHex(hex);
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            sle->setFieldU64(
+                xrpl::sfExchangeRate,
+                xrpl::getRate(xrpl::STAmount{out, outAmt}, xrpl::STAmount{in, inAmt}));
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, in.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, in.account);
+            sle->setFieldH160(xrpl::sfTakerGetsCurrency, out.currency);
+            sle->setFieldH160(xrpl::sfTakerGetsIssuer, out.account);
+            services.books().addFromSle(sle);
+        };
+        addDir(usd, mid, 100, 1, 1);
+        addDir(mid, eur, 100, 1, 2);
+        addDir(usd, dust, 1, 10, 3);
+        addDir(dust, xrp, 1, 10, 4);
+        addDir(xrp, eur, 1, 10, 5);
+
+        xrpl::STAmount const dstAmt{eur, 100};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(1),
+            {});
+        expect(found.candidates >= 2, "2-hop and 3-hop both stay as candidates");
+        bool sawTwoHop = false;
+        bool firstIsShort = false;
+        if (!found.paths.empty())
+        {
+            firstIsShort = found.paths[0].size() <= 2;
+            for (auto const& path : found.paths)
+            {
+                if (path.size() == 2)
+                {
+                    for (auto const& el : path)
+                    {
+                        if (pathElementAsset(el) == xrpl::Asset{mid})
+                            sawTwoHop = true;
+                    }
+                }
+            }
+        }
+        expect(firstIsShort, "1–2 hop pairs are returned ahead of longer hops");
+        expect(sawTwoHop, "mediocre 2-hop is not dropped for a better-tip 3-hop");
     }
 
     {
