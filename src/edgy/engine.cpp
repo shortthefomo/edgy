@@ -1278,13 +1278,18 @@ Engine::notifySubscriptions(bool revalidateOnly)
     if (!cache)
         return;
 
+    xrpl::LedgerIndex ledgerSeq = 0;
+    if (auto const view = cache->getLedger())
+        ledgerSeq = view->seq();
+
     int deepenLeft = 4;
     for (auto const& sub : live)
     {
         if (!sub.session->tryBeginUpdate())
             continue;
         bool reval = revalidateOnly;
-        if (reval && sub.session->shouldDeepen() && deepenLeft > 0)
+        if (reval && deepenLeft > 0 &&
+            (sub.session->shouldDeepen() || sub.session->shouldRediscover(ledgerSeq)))
         {
             reval = false;
             --deepenLeft;

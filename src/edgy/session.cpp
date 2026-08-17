@@ -155,6 +155,21 @@ PathSession::shouldDeepen() const
         lastDepth_.load(std::memory_order_acquire);
 }
 
+bool
+PathSession::shouldRediscover(xrpl::LedgerIndex ledgerSeq) const
+{
+    if (oneShot_ || closing_.load(std::memory_order_acquire))
+        return false;
+    // Still climbing hop bands — shouldDeepen owns those waves.
+    if (lastDepth_.load(std::memory_order_acquire) < cfg_.search)
+        return false;
+    return rediscoveryDue(
+        lastFullSearchIndex_,
+        ledgerSeq,
+        id_,
+        xrpl::rpc::tuning::kPathFullSearchInterval);
+}
+
 int
 PathSession::parseJson(json::Value const& jvIn)
 {
@@ -827,7 +842,10 @@ PathSession::doUpdate(
     }
 
     bool const fullSearch = !revalidateOnly;
-    bool const allowEscalate = !revalidateOnly;
+    // Dead context_ paths must run FastPathFinder again. Leaving
+    // allowEscalate false replayed the last quote for the life of the
+    // socket (path_revalidate_failed) while the market moved.
+    bool const allowEscalate = true;
 
     json::Value jvArray = kJsonArray;
     bool didFullSearch = false;
@@ -852,7 +870,6 @@ PathSession::doUpdate(
                 restoredStale = true;
             }
         }
-        newStatus[xrpl::jss::full_reply] = didFullSearch;
         if (restoredStale)
         {
             lastSuccess_ = false;
@@ -862,6 +879,14 @@ PathSession::doUpdate(
         else
         {
             lastSuccess_ = jvArray.size() != 0;
+            // xrpld marks a quote complete once the search is done, including
+            // ledger reprices. We used to set full_reply only on FastPathFinder
+            // waves, so UIs that commit the rate on full_reply froze after the
+            // last deepen (search-fast → search) for the rest of the socket.
+            auto const atTarget =
+                lastDepth_.load(std::memory_order_acquire) >= cfg_.search;
+            newStatus[xrpl::jss::full_reply] =
+                didFullSearch || (atTarget && lastSuccess_);
         }
         if (didFullSearch)
         {

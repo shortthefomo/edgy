@@ -26,6 +26,27 @@ namespace edgy {
 struct Config;
 
 /**
+ * True when a subscription should run FastPathFinder again instead of
+ * only RippleCalc on the last hop list. lastFull == 0 means no search
+ * has finished yet (create / deepen handles that). Due ledger is
+ *   lastFull + interval + (sessionId % interval)
+ * so sockets do not all rediscover on the same close.
+ */
+[[nodiscard]] inline bool
+rediscoveryDue(
+    xrpl::LedgerIndex lastFull,
+    xrpl::LedgerIndex ledgerSeq,
+    int sessionId,
+    std::uint32_t interval) noexcept
+{
+    if (lastFull == 0)
+        return false;
+    auto const iv = interval == 0 ? 1u : interval;
+    auto const id = sessionId < 0 ? 0 : static_cast<unsigned>(sessionId);
+    return ledgerSeq >= lastFull + iv + static_cast<xrpl::LedgerIndex>(id % iv);
+}
+
+/**
  * One path_find / ripple_path_find request.
  *
  * JSON parse, ranking, and result fields are copied from xrpld PathRequest
@@ -84,6 +105,11 @@ public:
     // True when wall-clock age has crossed the next hop-budget band.
     [[nodiscard]] bool
     shouldDeepen() const;
+
+    // True when this socket should rediscover hops (not only reprice
+    // context_). Staggered by id; false until the first full search.
+    [[nodiscard]] bool
+    shouldRediscover(xrpl::LedgerIndex ledgerSeq) const;
 
     [[nodiscard]] bool
     tryBeginUpdate()

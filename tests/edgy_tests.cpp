@@ -1041,6 +1041,14 @@ main()
         PathSession session(services, cfg, 1, true, services.getJournal("session"));
         PathSession live(services, cfg, 2, false, services.getJournal("session"));
         expect(!live.shouldDeepen(), "fresh WS does not deepen on the first tick");
+        expect(!live.shouldRediscover(10), "fresh WS has no last-full ledger yet");
+        expect(!rediscoveryDue(0, 99, 2, 3), "rediscoveryDue is false before first full search");
+        expect(!rediscoveryDue(10, 12, 0, 3), "rediscoveryDue waits for interval");
+        expect(rediscoveryDue(10, 13, 0, 3), "rediscoveryDue at last+interval for id%3==0");
+        expect(!rediscoveryDue(10, 13, 1, 3), "rediscoveryDue staggers id%3==1 by one extra ledger");
+        expect(rediscoveryDue(10, 14, 1, 3), "rediscoveryDue at last+interval+1 for id%3==1");
+        expect(rediscoveryDue(10, 15, 2, 3), "rediscoveryDue at last+interval+2 for id%3==2");
+        expect(rediscoveryDue(10, 11, 0, 1), "interval 1 rediscovers the next ledger");
 
         json::Value missing{json::ValueType::Object};
         auto [ok, st] = session.doCreate(cache, missing);
