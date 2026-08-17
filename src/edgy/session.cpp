@@ -735,6 +735,29 @@ PathSession::findPaths(
             xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
             auto rc = rippleCalculate(
                 sandbox, saMaxAmount, dstAmount, *dst_, *src_, ps, domain_, registry_, &rcInput);
+            // A junk hop list used to fail the whole set (alts=0) even when
+            // the default path or a subset would have paid. Retry default
+            // only; the finder already dropped paths that failed isolate.
+            if (rc.result() != xrpl::tesSUCCESS && !ps.empty())
+            {
+                xrpl::PaymentSandbox defBox(&*ledger, xrpl::TapNone);
+                auto def = rippleCalculate(
+                    defBox,
+                    saMaxAmount,
+                    dstAmount,
+                    *dst_,
+                    *src_,
+                    xrpl::STPathSet{},
+                    domain_,
+                    registry_,
+                    &rcInput);
+                if (def.result() == xrpl::tesSUCCESS)
+                {
+                    rc = def;
+                    ps = xrpl::STPathSet{};
+                    context_[asset] = ps;
+                }
+            }
             auto const calcMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tCalc);
 
