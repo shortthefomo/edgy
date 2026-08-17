@@ -19,7 +19,7 @@ A Payment can carry at most **6 paths**, each at most **8 hops**. Edgy never ret
 
 1. Full-syncs every ledger object once (`ledger_data`, binary).
 2. Applies each validated transaction’s `AffectedNodes` locally.
-3. Finds book/AMM routes on an in-memory payment graph, then runs RippleCalc only on the best few.
+3. Finds book/AMM routes on an in-memory payment graph (composed tip/AMM quality + size), then RippleCalcs convert-all shortlists and one set Flow for a fixed dest.
 4. Serves a worker pool (default 128, cap 256) so ~100 concurrent `path_find` sockets stay live.
 5. Proxies every other RPC/WS command to the upstream node.
 
@@ -27,10 +27,10 @@ A Payment can carry at most **6 paths**, each at most **8 hops**. Edgy never ret
 
 Not xrpld’s Pathfinder table (level 1–10). Search is a local book graph:
 
-1. **Scan** every 1-hop and 2-hop book pair (set intersection on the adjacency list).
-2. **Score** each pair from stored book-tip quality (`ExchangeRate` on directory roots). No offer walk.
-3. **RippleCalc** only the best ~8–12 candidates; keep **6** unique hop lists.
-4. Longer hops (via the native asset, then up to 8) fill leftover slots as a live WebSocket ages.
+1. **Scan** every 1-hop and 2-hop book pair (full set intersection). 3-hop via the native asset, then a 4-hop meet-in-the-middle, then a capped BFS up to 8 hops.
+2. **Score** each candidate from *composed* tip/AMM quality (decoded `ExchangeRate` / AMM spot, not added packed `uint64`s) and tip size. Convert-all ranks by estimated width; a fixed dest penalizes tips that cannot cover `dest/(maxPaths+2)` and drops hops already worse than `send_max/dest`.
+3. **Keep** the best ~8–12 unique hop lists (max **6** returned). Fixed-amount requests skip per-path RippleCalc — the session runs **one** Flow on the set. Convert-all still RippleCalcs the shortlist to measure width.
+4. Longer hops fill leftover slots as a live WebSocket ages.
 
 HTTP `ripple_path_find` is one mid-depth shot. WebSocket `path_find` starts shallow (fast first reply) and deepens while the socket stays open (about 4s / 12s / 25s / 50s, staggered per session).
 

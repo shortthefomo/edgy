@@ -25,6 +25,9 @@ class LocalOrderBooks;
  * 8 steps per path (Payment::kMaxPathLength) and 6 paths per set
  * (Payment::kMaxPathSize). One-shot ripple_path_find uses a fixed
  * mid depth because it only gets one response.
+ *
+ * twoHop is how many scored 2-hop pairs to keep after ranking every
+ * intersection — the walk itself is not truncated first.
  */
 struct SearchBudget
 {
@@ -67,13 +70,16 @@ struct FastPathResult
     int candidates{0};
     int ranked{0};
     int depth{0};
+    bool isolateRank{false};
     std::chrono::milliseconds search{0};
     std::chrono::milliseconds rank{0};
 };
 
 /**
- * Book/AMM graph search. Walks the in-memory order-book adjacency
- * and RippleCalcs only the short candidate list for the given budget.
+ * Book/AMM graph search. Scores every 1- and 2-hop pair (and a
+ * bidirectional 3/4-hop meet) from composed tip/AMM quality and tip
+ * size, then RippleCalcs only convert-all shortlists. Fixed-amount
+ * requests return the cheap shortlist for one set Flow.
  */
 class FastPathFinder
 {

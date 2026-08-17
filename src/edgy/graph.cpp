@@ -1,5 +1,6 @@
 #include <edgy/graph.hpp>
 
+#include <edgy/book_util.hpp>
 #include <edgy/compat.hpp>
 #include <edgy/order_books.hpp>
 #include <edgy/ripple_calc.hpp>
@@ -13,21 +14,30 @@
 #include <xrpl/protocol/Book.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
+#include <xrpl/protocol/Quality.h>
+#include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/TER.h>
 #include <xrpl/tx/paths/RippleCalc.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <limits>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace edgy {
 namespace {
+
+constexpr std::uint16_t kAmmFeeDivisor = 100'000;
 
 xrpl::STPathElement
 bookElement(xrpl::Asset const& out)
@@ -130,6 +140,267 @@ orderedNeighbors(
     return out;
 }
 
+xrpl::Quality
+worstQuality()
+{
+    return xrpl::Quality{LocalOrderBooks::kNoQuality / 2};
+}
+
+bool
+isConvertAllAmount(xrpl::STAmount const& amt)
+{
+    return amt == xrpl::STAmount(amt.asset(), 1u, 0, true);
+}
+
+std::optional<xrpl::STAmount>
+ammHolds(
+    std::shared_ptr<xrpl::ReadView const> const& ledger,
+    xrpl::AccountID const& acct,
+    xrpl::Asset const& asset)
+{
+    if (!ledger)
+        return std::nullopt;
+    if (xrpl::isXRP(asset))
+    {
+        auto const root = ledger->read(xrpl::keylet::account(acct));
+        if (!root || !root->isFieldPresent(xrpl::sfBalance))
+            return std::nullopt;
+        return root->getFieldAmount(xrpl::sfBalance);
+    }
+    return visitAsset(
+        asset,
+        [&](xrpl::Issue const& issue) -> std::optional<xrpl::STAmount> {
+            auto const line = ledger->read(trustLineKeylet(acct, issue));
+            if (!line || !line->isFieldPresent(xrpl::sfBalance))
+                return std::nullopt;
+            auto bal = line->getFieldAmount(xrpl::sfBalance);
+            // RippleState balance is from the low account's perspective.
+            if (acct > issue.account)
+                bal.negate();
+            if (bal.signum() < 0)
+                bal = xrpl::STAmount{bal.asset()};
+            return bal;
+        },
+        [](xrpl::MPTIssue const&) -> std::optional<xrpl::STAmount> { return std::nullopt; });
+}
+
+xrpl::STAmount
+amountFromDouble(xrpl::Asset const& asset, double v)
+{
+    if (!(v > 0) || !std::isfinite(v))
+        return xrpl::STAmount{asset};
+    int const exp = static_cast<int>(std::floor(std::log10(v)));
+    double const scaled = v / std::pow(10.0, exp);
+    auto const mant = static_cast<std::uint64_t>(std::llround(scaled * 1'000'000'000'000'000.0));
+    return xrpl::STAmount(asset, mant == 0 ? 1 : mant, exp - 15, false);
+}
+
+struct AmmQuote
+{
+    xrpl::Quality quality{worstQuality()};
+    double outSize{0};
+};
+
+std::optional<AmmQuote>
+ammQuote(
+    std::shared_ptr<xrpl::ReadView const> const& ledger,
+    xrpl::Asset const& in,
+    xrpl::Asset const& out,
+    double outNeeded)
+{
+    if (!ledger)
+        return std::nullopt;
+    auto const sle = ledger->read(xrpl::keylet::amm(in, out));
+    if (!sle || !sle->isFieldPresent(xrpl::sfAccount))
+        return std::nullopt;
+    auto const acct = sle->getAccountID(xrpl::sfAccount);
+    auto const inBal = ammHolds(ledger, acct, in);
+    auto const outBal = ammHolds(ledger, acct, out);
+    if (!inBal || !outBal || inBal->signum() <= 0 || outBal->signum() <= 0)
+        return std::nullopt;
+
+    double const x = amountAsDouble(*inBal);
+    double const y = amountAsDouble(*outBal);
+    if (!(x > 0) || !(y > 0))
+        return std::nullopt;
+
+    std::uint16_t fee = 0;
+    if (sle->isFieldPresent(xrpl::sfTradingFee))
+        fee = sle->getFieldU16(xrpl::sfTradingFee);
+    double const keep = 1.0 - (static_cast<double>(fee) / static_cast<double>(kAmmFeeDivisor));
+    if (keep <= 0)
+        return std::nullopt;
+
+    AmmQuote q;
+    q.outSize = y * 0.99;
+    double dy = (outNeeded > 0 && outNeeded < q.outSize) ? outNeeded : 0;
+    try
+    {
+        if (dy > 0)
+        {
+            double const dx = (x * dy / (y - dy)) / keep;
+            q.quality = xrpl::Quality{
+                xrpl::getRate(amountFromDouble(out, dy), amountFromDouble(in, dx))};
+        }
+        else
+        {
+            double const dx = (x / y) / keep;
+            q.quality = xrpl::Quality{
+                xrpl::getRate(amountFromDouble(out, 1.0), amountFromDouble(in, dx))};
+        }
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+    return q;
+}
+
+struct EdgeQuote
+{
+    xrpl::Quality quality{worstQuality()};
+    double outSize{0};
+};
+
+EdgeQuote
+quoteEdge(
+    LocalOrderBooks& books,
+    std::shared_ptr<xrpl::ReadView const> const& ledger,
+    xrpl::Asset const& in,
+    xrpl::Asset const& out,
+    std::optional<xrpl::uint256> const& domain,
+    double outNeeded)
+{
+    EdgeQuote q;
+    auto const tip = books.tip(in, out, domain);
+    if (tip.quality != LocalOrderBooks::kNoQuality)
+        q.quality = xrpl::Quality{tip.quality};
+    q.outSize = tip.outSize;
+    if (tip.amm)
+    {
+        if (auto amm = ammQuote(ledger, in, out, outNeeded))
+        {
+            if (amm->quality > q.quality)
+                q.quality = amm->quality;
+            if (amm->outSize > q.outSize)
+                q.outSize = amm->outSize;
+        }
+        else if (tip.quality == LocalOrderBooks::kNoQuality)
+        {
+            // Known AMM but no reserves yet — keep it above a missing book.
+            q.quality = xrpl::Quality{LocalOrderBooks::kNoQuality / 4};
+        }
+    }
+    return q;
+}
+
+struct PathScore
+{
+    xrpl::Quality quality{worstQuality()};
+    double destWidth{0};
+    std::vector<xrpl::Asset> hops;
+};
+
+std::optional<PathScore>
+scoreHops(
+    LocalOrderBooks& books,
+    std::shared_ptr<xrpl::ReadView const> const& ledger,
+    xrpl::Asset const& srcAsset,
+    xrpl::Asset const& dstAsset,
+    std::vector<xrpl::Asset> hops,
+    std::optional<xrpl::uint256> const& domain,
+    double destNeeded,
+    std::optional<xrpl::Quality> const& bound)
+{
+    if (hops.empty() || hops.size() > static_cast<std::size_t>(SearchBudget::kMaxPathLength))
+        return std::nullopt;
+
+    // Work backwards so AMM quotes see an estimated out volume.
+    std::vector<double> needed(hops.size(), 0);
+    needed.back() = destNeeded;
+    std::vector<EdgeQuote> quotes(hops.size());
+    for (std::size_t i = hops.size(); i-- > 0;)
+    {
+        auto const in = (i == 0) ? srcAsset : hops[i - 1];
+        quotes[i] = quoteEdge(books, ledger, in, hops[i], domain, needed[i]);
+        if (i > 0)
+        {
+            auto const ratio = qualityRatio(quotes[i].quality);
+            needed[i - 1] = (destNeeded > 0 && ratio > 0) ? destNeeded * ratio : 0;
+        }
+    }
+
+    xrpl::Quality composed = quotes.front().quality;
+    if (bound && composed < *bound)
+        return std::nullopt;
+    for (std::size_t i = 1; i < quotes.size(); ++i)
+    {
+        composed = composeQuality(composed, quotes[i].quality);
+        if (bound && composed < *bound)
+            return std::nullopt;
+    }
+
+    // Bottleneck width in dest units.
+    double width = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < hops.size(); ++i)
+    {
+        double const out = quotes[i].outSize;
+        if (!(out > 0))
+            continue;
+        double destEq = out;
+        if (i + 1 < quotes.size())
+        {
+            xrpl::Quality tail = quotes[i + 1].quality;
+            for (std::size_t j = i + 2; j < quotes.size(); ++j)
+                tail = composeQuality(tail, quotes[j].quality);
+            auto const r = qualityRatio(tail);
+            destEq = r > 0 ? out / r : 0;
+        }
+        if (destEq > 0 && destEq < width)
+            width = destEq;
+    }
+    if (!std::isfinite(width))
+        width = 0;
+
+    return PathScore{.quality = composed, .destWidth = width, .hops = std::move(hops)};
+}
+
+bool
+betterScore(PathScore const& a, PathScore const& b, bool convertAll, double minUseful)
+{
+    if (convertAll)
+    {
+        if (a.destWidth != b.destWidth)
+            return a.destWidth > b.destWidth;
+        if (a.quality != b.quality)
+            return a.quality > b.quality;
+        if (a.hops.size() != b.hops.size())
+            return a.hops.size() < b.hops.size();
+        return false;
+    }
+    bool const aThin = minUseful > 0 && a.destWidth > 0 && a.destWidth < minUseful;
+    bool const bThin = minUseful > 0 && b.destWidth > 0 && b.destWidth < minUseful;
+    if (aThin != bThin)
+        return !aThin;
+    if (a.quality != b.quality)
+        return a.quality > b.quality;
+    if (a.destWidth != b.destWidth)
+        return a.destWidth > b.destWidth;
+    if (a.hops.size() != b.hops.size())
+        return a.hops.size() < b.hops.size();
+    return false;
+}
+
+std::vector<xrpl::Asset>
+hopsFromPath(xrpl::STPath const& path)
+{
+    std::vector<xrpl::Asset> hops;
+    hops.reserve(path.size());
+    for (auto const& el : path)
+        hops.push_back(pathElementAsset(el));
+    return hops;
+}
+
 }  // namespace
 
 SearchBudget
@@ -156,7 +427,7 @@ SearchBudget::forDepth(int depth)
             b.autoSources = 10;
             break;
         case 2:
-            // Scan every 2-hop pair; RippleCalc only the best tips.
+            // Score every 2-hop pair; keep this many for Flow.
             b.maxHops = 4;
             b.twoHop = 128;
             b.expand = 16;
@@ -239,6 +510,7 @@ FastPathFinder::search(
 {
     FastPathResult result;
     result.depth = budget.depth;
+    result.isolateRank = convertAll;
     auto const t0 = std::chrono::steady_clock::now();
     auto j = services.getJournal("FastPath");
 
@@ -251,69 +523,53 @@ FastPathFinder::search(
     auto const srcIsXrp = xrpl::isXRP(srcAsset);
     auto const dstIsXrp = xrpl::isXRP(dstAsset);
 
-    xrpl::STPathSet candidates;
-
-    auto edgeQ = [&](xrpl::Asset const& in, xrpl::Asset const& out) -> std::uint64_t {
-        auto q = books.tipQuality(in, out, domain);
-        return q == LocalOrderBooks::kNoQuality ? (LocalOrderBooks::kNoQuality / 2) : q;
-    };
-    auto pathQ = [&](std::vector<xrpl::Asset> const& hops) -> std::uint64_t {
-        if (hops.empty())
-            return LocalOrderBooks::kNoQuality;
-        std::uint64_t q = edgeQ(srcAsset, hops.front());
-        for (std::size_t i = 1; i < hops.size(); ++i)
-        {
-            auto const nq = edgeQ(hops[i - 1], hops[i]);
-            q = nq > LocalOrderBooks::kNoQuality - q ? LocalOrderBooks::kNoQuality : q + nq;
-        }
-        return q;
-    };
-
-    struct Scored
+    std::optional<xrpl::Quality> bound;
+    if (!convertAll && sendMax && !isConvertAllAmount(*sendMax) && sendMax->signum() > 0 &&
+        dstAmount.signum() > 0)
     {
-        std::uint64_t score{LocalOrderBooks::kNoQuality};
-        std::vector<xrpl::Asset> hops;
+        bound = xrpl::Quality{xrpl::getRate(dstAmount, *sendMax)};
+    }
+
+    double const destNeeded = convertAll ? 0.0 : amountAsDouble(dstAmount);
+    double const minUseful = convertAll
+        ? 0.0
+        : destNeeded / static_cast<double>(std::max(1, xrpl::rpc::tuning::kPathFindMaxPaths + 2));
+
+    std::vector<PathScore> scored;
+    scored.reserve(static_cast<std::size_t>(budget.twoHop) + 16);
+
+    auto consider = [&](std::vector<xrpl::Asset> hops) {
+        if (continueCallback && !continueCallback())
+            return;
+        if (auto s = scoreHops(
+                books, ledger, srcAsset, dstAsset, std::move(hops), domain, destNeeded, bound))
+            scored.push_back(std::move(*s));
     };
-    std::vector<Scored> pairs;
-    pairs.reserve(static_cast<std::size_t>(budget.twoHop) + 2);
 
     if (books.hasBook(srcAsset, dstAsset, domain))
-        pairs.push_back({.score = pathQ({dstAsset}), .hops = {dstAsset}});
+        consider({dstAsset});
 
     if (!srcIsXrp && !dstIsXrp && books.hasBook(srcAsset, xrp, domain) &&
         books.hasBook(xrp, dstAsset, domain))
     {
-        pairs.push_back({.score = pathQ({xrp, dstAsset}), .hops = {xrp, dstAsset}});
+        consider({xrp, dstAsset});
     }
 
+    // Score every 2-hop meet; keep the best twoHop after sort.
+    for (auto const& mid : books.intermediates(srcAsset, dstAsset, domain))
     {
-        int n = 0;
-        for (auto const& mid : books.intermediates(srcAsset, dstAsset, domain))
-        {
-            if (continueCallback && !continueCallback())
-                break;
-            if (mid == srcAsset || mid == dstAsset || xrpl::equalTokens(mid, srcAsset) ||
-                xrpl::equalTokens(mid, dstAsset))
-                continue;
-            if (!srcIsXrp && !dstIsXrp && xrpl::isXRP(mid))
-                continue;
-            pairs.push_back({.score = pathQ({mid, dstAsset}), .hops = {mid, dstAsset}});
-            if (++n >= budget.twoHop)
-                break;
-        }
+        if (continueCallback && !continueCallback())
+            break;
+        if (mid == srcAsset || mid == dstAsset || xrpl::equalTokens(mid, srcAsset) ||
+            xrpl::equalTokens(mid, dstAsset))
+            continue;
+        if (!srcIsXrp && !dstIsXrp && xrpl::isXRP(mid))
+            continue;
+        consider({mid, dstAsset});
     }
-
-    std::ranges::sort(pairs, [](Scored const& a, Scored const& b) {
-        if (a.score != b.score)
-            return a.score < b.score;
-        return a.hops.size() < b.hops.size();
-    });
-    for (auto const& p : pairs)
-        addPath(candidates, bookPath(p.hops));
 
     if (maxHops >= 3 && !dstIsXrp && books.hasBook(xrp, dstAsset, domain))
     {
-        int n = 0;
         for (auto const& mid : books.intermediates(srcAsset, xrp, domain))
         {
             if (continueCallback && !continueCallback())
@@ -321,15 +577,12 @@ FastPathFinder::search(
             if (xrpl::isXRP(mid) || xrpl::equalTokens(mid, srcAsset) ||
                 xrpl::equalTokens(mid, dstAsset))
                 continue;
-            addPath(candidates, bookPath({mid, xrp, dstAsset}));
-            if (++n >= budget.twoHop / 2)
-                break;
+            consider({mid, xrp, dstAsset});
         }
     }
 
     if (maxHops >= 3 && !srcIsXrp && books.hasBook(srcAsset, xrp, domain))
     {
-        int n = 0;
         for (auto const& mid : books.intermediates(xrp, dstAsset, domain))
         {
             if (continueCallback && !continueCallback())
@@ -337,13 +590,125 @@ FastPathFinder::search(
             if (xrpl::isXRP(mid) || xrpl::equalTokens(mid, srcAsset) ||
                 xrpl::equalTokens(mid, dstAsset))
                 continue;
-            addPath(candidates, bookPath({xrp, mid, dstAsset}));
-            if (++n >= budget.twoHop / 2)
-                break;
+            consider({xrp, mid, dstAsset});
         }
     }
 
+    // 4-hop meet-in-the-middle: src→A→B  ∩  X→M→dst with B==X.
     if (maxHops >= 4)
+    {
+        struct Leg
+        {
+            PathScore score;
+            xrpl::Asset via{};
+        };
+        std::vector<Leg> prefixes;
+        std::vector<Leg> suffixes;
+        prefixes.reserve(static_cast<std::size_t>(budget.twoHop));
+        suffixes.reserve(static_cast<std::size_t>(budget.twoHop));
+
+        int const legCap = std::max(budget.twoHop * 4, 32);
+        int nPref = 0;
+        for (auto const& a : books.neighbors(srcAsset, domain))
+        {
+            if (continueCallback && !continueCallback())
+                break;
+            if (nPref >= legCap)
+                break;
+            if (a == srcAsset || xrpl::equalTokens(a, srcAsset))
+                continue;
+            for (auto const& b : books.neighbors(a, domain))
+            {
+                if (nPref >= legCap)
+                    break;
+                if (b == srcAsset || b == a || xrpl::equalTokens(b, srcAsset))
+                    continue;
+                if (auto s = scoreHops(
+                        books,
+                        ledger,
+                        srcAsset,
+                        b,
+                        {a, b},
+                        domain,
+                        0,
+                        std::nullopt))
+                {
+                    prefixes.push_back(Leg{std::move(*s), b});
+                    ++nPref;
+                }
+            }
+        }
+        int nSuf = 0;
+        for (auto const& m : books.predecessors(dstAsset, domain))
+        {
+            if (continueCallback && !continueCallback())
+                break;
+            if (nSuf >= legCap)
+                break;
+            if (m == dstAsset || xrpl::equalTokens(m, dstAsset))
+                continue;
+            for (auto const& x : books.predecessors(m, domain))
+            {
+                if (nSuf >= legCap)
+                    break;
+                if (x == dstAsset || x == m || xrpl::equalTokens(x, dstAsset))
+                    continue;
+                if (auto s = scoreHops(
+                        books,
+                        ledger,
+                        x,
+                        dstAsset,
+                        {m, dstAsset},
+                        domain,
+                        destNeeded,
+                        bound))
+                {
+                    suffixes.push_back(Leg{std::move(*s), x});
+                    ++nSuf;
+                }
+            }
+        }
+
+        auto takeLegs = [&](std::vector<Leg>& legs) {
+            if (static_cast<int>(legs.size()) <= budget.twoHop)
+                return;
+            std::ranges::partial_sort(
+                legs,
+                legs.begin() + budget.twoHop,
+                [&](Leg const& a, Leg const& b) {
+                    return betterScore(a.score, b.score, convertAll, minUseful);
+                });
+            legs.resize(static_cast<std::size_t>(budget.twoHop));
+        };
+        takeLegs(prefixes);
+        takeLegs(suffixes);
+
+        std::unordered_multimap<std::string, Leg const*> byEnd;
+        auto assetKey = [](xrpl::Asset const& a) { return to_string(a); };
+        for (auto const& s : suffixes)
+            byEnd.emplace(assetKey(s.via), &s);
+        for (auto const& p : prefixes)
+        {
+            if (continueCallback && !continueCallback())
+                break;
+            auto range = byEnd.equal_range(assetKey(p.via));
+            for (auto it = range.first; it != range.second; ++it)
+            {
+                auto const& suf = *it->second;
+                if (p.score.hops.size() < 2 || suf.score.hops.size() < 2)
+                    continue;
+                auto const& a = p.score.hops.front();
+                auto const& b = p.score.hops.back();
+                auto const& m = suf.score.hops.front();
+                if (a == m || b == m || a == dstAsset)
+                    continue;
+                consider({a, b, m, dstAsset});
+            }
+        }
+    }
+
+    // Longer leftover hops (5–8) from a capped BFS.
+    if (maxHops >= 5)
     {
         struct Frame
         {
@@ -373,7 +738,7 @@ FastPathFinder::search(
                 if (static_cast<int>(hops.size()) > maxHops)
                     continue;
                 if (next == dstAsset)
-                    addPath(candidates, bookPath(hops));
+                    consider(hops);
                 else if (static_cast<int>(hops.size()) < maxHops)
                     q.push_back(Frame{next, std::move(hops)});
                 if (++branched >= budget.branch)
@@ -385,9 +750,22 @@ FastPathFinder::search(
 
     for (auto const& path : extra)
     {
-        if (path.size() <= SearchBudget::kMaxPathLength)
-            addPath(candidates, path);
+        if (path.empty() || path.size() > SearchBudget::kMaxPathLength)
+            continue;
+        consider(hopsFromPath(path));
     }
+
+    std::ranges::sort(scored, [&](PathScore const& a, PathScore const& b) {
+        return betterScore(a, b, convertAll, minUseful);
+    });
+
+    // Keep the best twoHop (plus extras already merged) as the candidate pool.
+    if (static_cast<int>(scored.size()) > budget.twoHop)
+        scored.resize(static_cast<std::size_t>(budget.twoHop));
+
+    xrpl::STPathSet candidates;
+    for (auto const& s : scored)
+        addPath(candidates, bookPath(s.hops));
 
     result.candidates = static_cast<int>(candidates.size());
     result.search = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -407,59 +785,113 @@ FastPathFinder::search(
 
     struct Rank
     {
-        std::uint64_t quality{};
+        xrpl::Quality quality{worstQuality()};
         xrpl::STAmount liquidity;
         std::size_t length{};
         int index{};
+        bool fromCalc{false};
     };
     std::vector<Rank> ranks;
-    ranks.reserve(std::min(candidates.size(), static_cast<std::size_t>(budget.rank)));
 
     int const limit = std::min(static_cast<int>(candidates.size()), budget.rank);
     std::unordered_set<std::string> rankedKeys;
     rankedKeys.reserve(static_cast<std::size_t>(limit));
-    int ranked = 0;
-    for (int i = 0; i < static_cast<int>(candidates.size()) && ranked < limit; ++i)
+
+    auto pushCheap = [&](int i, xrpl::STPath const& path) {
+        ranks.push_back(Rank{
+            .quality = (static_cast<std::size_t>(i) < scored.size()) ? scored[static_cast<std::size_t>(i)].quality
+                                                                     : worstQuality(),
+            .liquidity = (static_cast<std::size_t>(i) < scored.size() &&
+                          scored[static_cast<std::size_t>(i)].destWidth > 0)
+                ? xrpl::STAmount(
+                      dstAsset,
+                      static_cast<std::uint64_t>(
+                          std::min(scored[static_cast<std::size_t>(i)].destWidth, 1e15)),
+                      0,
+                      false)
+                : xrpl::STAmount{dstAsset},
+            .length = path.size(),
+            .index = i,
+            .fromCalc = false});
+    };
+
+    if (result.isolateRank)
     {
-        if (continueCallback && !continueCallback())
-            break;
-        auto const& path = candidates[static_cast<std::size_t>(i)];
-        if (path.size() > SearchBudget::kMaxPathLength)
-            continue;
-        auto const sig = hopCurrencyKey(path);
-        if (!rankedKeys.insert(sig).second)
-            continue;
-        ++ranked;
-        xrpl::STPathSet one;
-        pathSetPushAlways(one, path);
-
-        xrpl::path::RippleCalc::Input rcInput;
-        rcInput.defaultPathsAllowed = false;
-        rcInput.partialPaymentAllowed = true;
-
-        try
+        ranks.reserve(static_cast<std::size_t>(limit));
+        int ranked = 0;
+        for (int i = 0; i < static_cast<int>(candidates.size()) && ranked < limit; ++i)
         {
-            xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-            auto rc = rippleCalculate(
-                sandbox, saMax, saMinDst, dst, src, one, domain, services, &rcInput);
-            if (!xrpl::isTesSuccess(rc.result()))
+            if (continueCallback && !continueCallback())
+                break;
+            auto const& path = candidates[static_cast<std::size_t>(i)];
+            if (path.size() > SearchBudget::kMaxPathLength)
                 continue;
+            auto const sig = hopCurrencyKey(path);
+            if (!rankedKeys.insert(sig).second)
+                continue;
+            ++ranked;
+            xrpl::STPathSet one;
+            pathSetPushAlways(one, path);
 
-            ranks.push_back(Rank{
-                .quality = xrpl::getRate(rc.actualAmountOut, rc.actualAmountIn),
-                .liquidity = rc.actualAmountOut,
-                .length = path.size(),
-                .index = i});
+            xrpl::path::RippleCalc::Input rcInput;
+            rcInput.defaultPathsAllowed = false;
+            rcInput.partialPaymentAllowed = true;
+
+            try
+            {
+                xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
+                auto rc = rippleCalculate(
+                    sandbox, saMax, saMinDst, dst, src, one, domain, services, &rcInput);
+                if (!xrpl::isTesSuccess(rc.result()))
+                    continue;
+
+                ranks.push_back(Rank{
+                    .quality = xrpl::Quality{xrpl::getRate(rc.actualAmountOut, rc.actualAmountIn)},
+                    .liquidity = rc.actualAmountOut,
+                    .length = path.size(),
+                    .index = i,
+                    .fromCalc = true});
+            }
+            catch (std::exception const& ex)
+            {
+                JLOG(j.debug()) << "fast path rank exception: " << ex.what();
+            }
         }
-        catch (std::exception const& ex)
+        if (ranks.empty())
         {
-            JLOG(j.debug()) << "fast path rank exception: " << ex.what();
+            rankedKeys.clear();
+            for (int i = 0; i < static_cast<int>(candidates.size()) &&
+                 static_cast<int>(ranks.size()) < limit;
+                 ++i)
+            {
+                auto const& path = candidates[static_cast<std::size_t>(i)];
+                if (path.size() > SearchBudget::kMaxPathLength)
+                    continue;
+                if (!rankedKeys.insert(hopCurrencyKey(path)).second)
+                    continue;
+                pushCheap(i, path);
+            }
+        }
+    }
+    else
+    {
+        ranks.reserve(static_cast<std::size_t>(limit));
+        for (int i = 0; i < static_cast<int>(candidates.size()) &&
+             static_cast<int>(ranks.size()) < limit;
+             ++i)
+        {
+            auto const& path = candidates[static_cast<std::size_t>(i)];
+            if (path.size() > SearchBudget::kMaxPathLength)
+                continue;
+            if (!rankedKeys.insert(hopCurrencyKey(path)).second)
+                continue;
+            pushCheap(i, path);
         }
     }
 
     std::ranges::sort(ranks, [&](Rank const& a, Rank const& b) {
         if (!convertAll && a.quality != b.quality)
-            return a.quality < b.quality;
+            return a.quality > b.quality;
         if (a.liquidity != b.liquidity)
             return a.liquidity > b.liquidity;
         if (a.length != b.length)
