@@ -1,3 +1,4 @@
+#include <edgy/book_util.hpp>
 #include <edgy/config.hpp>
 #include <edgy/version.hpp>
 #include <edgy/engine.hpp>
@@ -24,6 +25,7 @@
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STParsedJSON.h>
+#include <xrpl/protocol/Quality.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STVector256.h>
@@ -997,6 +999,41 @@ main()
     }
 
     {
+        auto const gw = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue xrp = xrpl::xrpIssue();
+        xrpl::STAmount const pays{usd, 10};
+        xrpl::STAmount const gets{xrp, 20};
+        auto hop1 = xrpl::Quality{xrpl::getRate(gets, pays)};
+        auto hop2 = xrpl::Quality{xrpl::getRate(pays, gets)};
+        auto composed = composeQuality(hop1, hop2);
+        auto direct = xrpl::Quality{xrpl::getRate(pays, pays)};
+        expect(composed == direct, "composed hop qualities multiply to the direct rate");
+        expect(qualityRatio(hop1) > 0, "qualityRatio is a positive in/out");
+        expect(amountAsDouble(gets) == 20, "amountAsDouble reads native drops");
+    }
+
+    {
+        LocalOrderBooks books;
+        auto const gw = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue xrp = xrpl::xrpIssue();
+        xrpl::uint256 key;
+        (void)key.parseHex("03000000000000000000000000000000000000000000000000000000000000BB");
+        auto offer = std::make_shared<xrpl::SLE>(xrpl::ltOFFER, key);
+        offer->setFieldAmount(xrpl::sfTakerPays, xrpl::STAmount{usd, 25});
+        offer->setFieldAmount(xrpl::sfTakerGets, xrpl::STAmount{xrp, 50});
+        books.addFromSle(offer);
+        expect(books.hasBook(usd, xrp), "offer SLE adds the book");
+        expect(books.tip(usd, xrp).outSize == 50, "offer SLE stores tip takerGets");
+        expect(books.tip(usd, xrp).quality == xrpl::getRate(xrpl::STAmount{xrp, 50}, xrpl::STAmount{usd, 25}),
+               "offer SLE stores getRate quality");
+        books.removeFromSle(offer);
+        expect(books.hasBook(usd, xrp), "removing an offer keeps the book adjacency");
+        expect(books.tip(usd, xrp).outSize == 0, "removing the tip offer clears size");
+    }
+
+    {
         using namespace std::chrono_literals;
         auto d0 = SearchBudget::forDepth(0);
         auto d2 = SearchBudget::forDepth(2);
@@ -1141,6 +1178,290 @@ main()
         expect(found.paths.empty(), "empty book graph yields no paths");
         expect(found.candidates == 0, "empty book graph has no candidates");
         expect(found.depth == 0, "empty search reports the requested depth");
+        expect(found.isolateRank, "fixed dest isolate-ranks the shortlist");
+    }
+
+    {
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue eur{xrpl::toCurrency("EUR"), gw};
+        auto midIssue = [&](char const* code) {
+            return xrpl::Issue{xrpl::toCurrency(code), gw};
+        };
+
+        auto addDir = [&](xrpl::Issue const& in, xrpl::Issue const& out, std::uint64_t inAmt, std::uint64_t outAmt, int n) {
+            xrpl::uint256 key;
+            std::string hex(64, '0');
+            hex[62] = "0123456789ABCDEF"[static_cast<unsigned>(n) % 16];
+            hex[63] = "0123456789ABCDEF"[static_cast<unsigned>(n / 16) % 16];
+            (void)key.parseHex(hex);
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            sle->setFieldU64(
+                xrpl::sfExchangeRate,
+                xrpl::getRate(xrpl::STAmount{out, outAmt}, xrpl::STAmount{in, inAmt}));
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, in.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, in.account);
+            sle->setFieldH160(xrpl::sfTakerGetsCurrency, out.currency);
+            sle->setFieldH160(xrpl::sfTakerGetsIssuer, out.account);
+            services.books().addFromSle(sle);
+        };
+
+        // Many mediocre 2-hop mids (100 in for 1 out each hop), one 1:1 pair.
+        for (int i = 0; i < 40; ++i)
+        {
+            char code[4] = {'A', 'A', static_cast<char>('A' + (i % 26)), 0};
+            auto mid = midIssue(code);
+            addDir(usd, mid, 100, 1, 10 + i);
+            addDir(mid, eur, 100, 1, 60 + i);
+        }
+        auto best = midIssue("BST");
+        addDir(usd, best, 1, 1, 1);
+        addDir(best, eur, 1, 1, 2);
+
+        xrpl::STAmount const dstAmt{eur, 100};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(0),
+            {});
+        expect(found.isolateRank, "fixed-amount still isolate-ranks the shortlist");
+        expect(found.candidates > 0, "2-hop graph yields candidates");
+        expect(!found.paths.empty(), "empty ledger falls back to cheap-scored 2-hop order");
+        bool sawBest = false;
+        if (!found.paths.empty())
+        {
+            auto const hops = found.paths[0];
+            for (auto const& el : hops)
+            {
+                if (pathElementAsset(el) == xrpl::Asset{best})
+                    sawBest = true;
+            }
+        }
+        expect(sawBest, "best tip 2-hop is kept among many worse mids");
+    }
+
+    {
+        // 3-hop dust tips must not bury a worse-but-real 2-hop pair.
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue eur{xrpl::toCurrency("EUR"), gw};
+        xrpl::Issue mid{xrpl::toCurrency("MID"), gw};
+        xrpl::Issue dust{xrpl::toCurrency("DST"), gw};
+        xrpl::Issue xrp = xrpl::xrpIssue();
+
+        auto addDir = [&](xrpl::Issue const& in, xrpl::Issue const& out, std::uint64_t inAmt, std::uint64_t outAmt, int n) {
+            xrpl::uint256 key;
+            std::string hex(64, 'E');
+            hex[62] = "0123456789ABCDEF"[static_cast<unsigned>(n) % 16];
+            hex[63] = "0123456789ABCDEF"[static_cast<unsigned>(n / 16) % 16];
+            (void)key.parseHex(hex);
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            sle->setFieldU64(
+                xrpl::sfExchangeRate,
+                xrpl::getRate(xrpl::STAmount{out, outAmt}, xrpl::STAmount{in, inAmt}));
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, in.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, in.account);
+            sle->setFieldH160(xrpl::sfTakerGetsCurrency, out.currency);
+            sle->setFieldH160(xrpl::sfTakerGetsIssuer, out.account);
+            services.books().addFromSle(sle);
+        };
+        addDir(usd, mid, 100, 1, 1);
+        addDir(mid, eur, 100, 1, 2);
+        addDir(usd, dust, 1, 10, 3);
+        addDir(dust, xrp, 1, 10, 4);
+        addDir(xrp, eur, 1, 10, 5);
+
+        xrpl::STAmount const dstAmt{eur, 100};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(1),
+            {});
+        expect(found.candidates >= 2, "2-hop and 3-hop both stay as candidates");
+        bool sawTwoHop = false;
+        bool firstIsShort = false;
+        if (!found.paths.empty())
+        {
+            firstIsShort = found.paths[0].size() <= 2;
+            for (auto const& path : found.paths)
+            {
+                if (path.size() == 2)
+                {
+                    for (auto const& el : path)
+                    {
+                        if (pathElementAsset(el) == xrpl::Asset{mid})
+                            sawTwoHop = true;
+                    }
+                }
+            }
+        }
+        expect(firstIsShort, "1–2 hop pairs are returned ahead of longer hops");
+        expect(sawTwoHop, "mediocre 2-hop is not dropped for a better-tip 3-hop");
+    }
+
+    {
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue eur{xrpl::toCurrency("EUR"), gw};
+        xrpl::Issue thin{xrpl::toCurrency("THN"), gw};
+        xrpl::Issue fat{xrpl::toCurrency("FAT"), gw};
+
+        auto addOffer = [&](xrpl::Issue const& in, xrpl::Issue const& out, std::uint64_t pays, std::uint64_t gets, int n) {
+            xrpl::uint256 key;
+            std::string hex(64, 'C');
+            hex[62] = "0123456789ABCDEF"[static_cast<unsigned>(n) % 16];
+            hex[63] = "0123456789ABCDEF"[static_cast<unsigned>(n / 16) % 16];
+            (void)key.parseHex(hex);
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltOFFER, key);
+            sle->setFieldAmount(xrpl::sfTakerPays, xrpl::STAmount{in, pays});
+            sle->setFieldAmount(xrpl::sfTakerGets, xrpl::STAmount{out, gets});
+            services.books().addFromSle(sle);
+        };
+        // Thin: excellent rate, dust size. Fat: worse rate, huge size.
+        addOffer(usd, thin, 1, 10, 1);
+        addOffer(thin, eur, 1, 10, 2);
+        addOffer(usd, fat, 50, 10, 3);
+        addOffer(fat, eur, 50, 1'000'000, 4);
+
+        xrpl::STAmount const destAll{xrpl::STAmount(eur, 1u, 0, true)};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            destAll,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            true,
+            SearchBudget::forDepth(0),
+            {});
+        expect(found.isolateRank, "convert-all isolate-ranks the shortlist");
+        expect(!found.paths.empty(), "convert-all falls back to cheap width when calc has no ledger");
+        bool sawFat = false;
+        if (!found.paths.empty())
+        {
+            for (auto const& el : found.paths[0])
+            {
+                if (pathElementAsset(el) == xrpl::Asset{fat})
+                    sawFat = true;
+            }
+        }
+        expect(sawFat, "convert-all prefers the wide path over a better-but-tiny tip");
+    }
+
+    {
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue eur{xrpl::toCurrency("EUR"), gw};
+
+        auto addDir = [&](std::uint64_t rate) {
+            xrpl::uint256 key;
+            (void)key.parseHex("0D00000000000000000000000000000000000000000000000000000000000001");
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            sle->setFieldU64(xrpl::sfExchangeRate, rate);
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, usd.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, usd.account);
+            sle->setFieldH160(xrpl::sfTakerGetsCurrency, eur.currency);
+            sle->setFieldH160(xrpl::sfTakerGetsIssuer, eur.account);
+            services.books().addFromSle(sle);
+        };
+
+        xrpl::STAmount const dstAmt{eur, 100};
+        xrpl::STAmount const sendMax{usd, 1};
+        addDir(LocalOrderBooks::kNoQuality / 2);
+        auto bad = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            sendMax,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(0),
+            {});
+        expect(bad.candidates == 0, "send_max prunes a hop already worse than dest/send_max");
+
+        services.books().clear();
+        addDir(1);
+        auto good = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            sendMax,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(0),
+            {});
+        expect(good.candidates > 0, "send_max keeps a hop inside the dest/send_max bound");
     }
 
     {

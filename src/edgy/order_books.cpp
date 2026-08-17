@@ -7,12 +7,111 @@
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/PathAsset.h>
 #include <xrpl/protocol/SField.h>
+#include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/UintTypes.h>
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 namespace edgy {
+namespace {
+
+bool
+isBookDirRoot(xrpl::SLE const& sle)
+{
+    return sle.getType() == xrpl::ltDIR_NODE && sle.isFieldPresent(xrpl::sfExchangeRate) &&
+        sle.isFieldPresent(xrpl::sfRootIndex) && sle.getFieldH256(xrpl::sfRootIndex) == sle.key();
+}
+
+std::optional<xrpl::Book>
+bookFromDir(xrpl::SLE const& sle)
+{
+    xrpl::Book book;
+    if (sle.isFieldPresent(xrpl::sfTakerPaysCurrency))
+    {
+        xrpl::Issue issue;
+        issue.currency = sle.getFieldH160(xrpl::sfTakerPaysCurrency);
+        issue.account = sle.getFieldH160(xrpl::sfTakerPaysIssuer);
+        book.in = issue;
+    }
+#ifndef EDGY_XAHAU
+    else if (sle.isFieldPresent(xrpl::sfTakerPaysMPT))
+    {
+        book.in = sle.getFieldH192(xrpl::sfTakerPaysMPT);
+    }
+#endif
+    else
+    {
+        return std::nullopt;
+    }
+
+    if (sle.isFieldPresent(xrpl::sfTakerGetsCurrency))
+    {
+        xrpl::Issue issue;
+        issue.currency = sle.getFieldH160(xrpl::sfTakerGetsCurrency);
+        issue.account = sle.getFieldH160(xrpl::sfTakerGetsIssuer);
+        book.out = issue;
+    }
+#ifndef EDGY_XAHAU
+    else if (sle.isFieldPresent(xrpl::sfTakerGetsMPT))
+    {
+        book.out = sle.getFieldH192(xrpl::sfTakerGetsMPT);
+    }
+#endif
+    else
+    {
+        return std::nullopt;
+    }
+#ifndef EDGY_XAHAU
+    book.domain = sle[~xrpl::sfDomainID];
+#endif
+    return book;
+}
+
+std::optional<xrpl::Book>
+bookFromOffer(xrpl::SLE const& sle)
+{
+    if (sle.getType() != xrpl::ltOFFER || !sle.isFieldPresent(xrpl::sfTakerPays) ||
+        !sle.isFieldPresent(xrpl::sfTakerGets))
+        return std::nullopt;
+    auto const pays = sle.getFieldAmount(xrpl::sfTakerPays);
+    auto const gets = sle.getFieldAmount(xrpl::sfTakerGets);
+    if (pays.signum() <= 0 || gets.signum() <= 0)
+        return std::nullopt;
+#ifndef EDGY_XAHAU
+    return makeBook(pays.asset(), gets.asset(), sle[~xrpl::sfDomainID]);
+#else
+    return makeBook(pays.asset(), gets.asset());
+#endif
+}
+
+std::uint64_t
+dirQuality(xrpl::SLE const& sle)
+{
+    std::uint64_t q = xrpl::getQuality(sle.key());
+    if (sle.isFieldPresent(xrpl::sfExchangeRate))
+        q = sle.getFieldU64(xrpl::sfExchangeRate);
+    return q;
+}
+
+void
+mergeBetter(BookEdge& dst, BookEdge const& src)
+{
+    if (src.amm)
+        dst.amm = true;
+    if (src.quality < dst.quality)
+    {
+        dst.quality = src.quality;
+        dst.outSize = src.outSize;
+    }
+    else if (src.quality == dst.quality && src.outSize > dst.outSize)
+    {
+        dst.outSize = src.outSize;
+    }
+}
+
+}  // namespace
 
 void
 LocalOrderBooks::addBookUnlocked(xrpl::Book const& book)
@@ -39,14 +138,82 @@ LocalOrderBooks::addBookUnlocked(xrpl::Book const& book)
 void
 LocalOrderBooks::noteQualityUnlocked(xrpl::Book const& book, std::uint64_t quality)
 {
-    setQualityUnlocked(book, quality);
+    setDirQualityUnlocked(book, quality);
 }
 
 void
-LocalOrderBooks::setQualityUnlocked(xrpl::Book const& book, std::uint64_t quality)
+LocalOrderBooks::setDirQualityUnlocked(xrpl::Book const& book, std::uint64_t quality)
 {
-    tipQuality_[book] = quality;
-    tokenTip_[xrpl::PathAsset{book.in}][book.out] = quality;
+    addBookUnlocked(book);
+    auto apply = [&](BookEdge& edge) {
+        if (edge.quality != quality)
+            edge.outSize = 0;
+        edge.quality = quality;
+    };
+    apply(tipQuality_[book]);
+#ifndef EDGY_XAHAU
+    if (book.domain)
+        return;
+#endif
+    apply(tokenTip_[xrpl::PathAsset{book.in}][book.out]);
+}
+
+void
+LocalOrderBooks::noteOfferUnlocked(
+    xrpl::Book const& book,
+    std::uint64_t quality,
+    double outSize)
+{
+    addBookUnlocked(book);
+    auto apply = [&](BookEdge& edge) {
+        if (quality < edge.quality)
+        {
+            edge.quality = quality;
+            edge.outSize = outSize;
+        }
+        else if (quality == edge.quality && outSize > edge.outSize)
+        {
+            edge.outSize = outSize;
+        }
+    };
+    apply(tipQuality_[book]);
+#ifndef EDGY_XAHAU
+    if (book.domain)
+        return;
+#endif
+    apply(tokenTip_[xrpl::PathAsset{book.in}][book.out]);
+}
+
+void
+LocalOrderBooks::markAmmUnlocked(xrpl::Book const& book)
+{
+    addBookUnlocked(book);
+    tipQuality_[book].amm = true;
+#ifndef EDGY_XAHAU
+    if (book.domain)
+        return;
+#endif
+    tokenTip_[xrpl::PathAsset{book.in}][book.out].amm = true;
+}
+
+void
+LocalOrderBooks::forgetOfferUnlocked(xrpl::Book const& book, std::uint64_t quality)
+{
+    auto forget = [&](BookEdge& edge) {
+        if (edge.quality == quality)
+            edge.outSize = 0;
+    };
+    if (auto it = tipQuality_.find(book); it != tipQuality_.end())
+        forget(it->second);
+#ifndef EDGY_XAHAU
+    if (book.domain)
+        return;
+#endif
+    if (auto tit = tokenTip_.find(xrpl::PathAsset{book.in}); tit != tokenTip_.end())
+    {
+        if (auto oit = tit->second.find(book.out); oit != tit->second.end())
+            forget(oit->second);
+    }
 }
 
 void
@@ -123,56 +290,23 @@ LocalOrderBooks::addFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
     if (!sle)
         return;
 
-    if (sle->getType() == xrpl::ltDIR_NODE && sle->isFieldPresent(xrpl::sfExchangeRate) &&
-        sle->getFieldH256(xrpl::sfRootIndex) == sle->key())
+    if (isBookDirRoot(*sle))
     {
-        xrpl::Book book;
-        if (sle->isFieldPresent(xrpl::sfTakerPaysCurrency))
-        {
-            xrpl::Issue issue;
-            issue.currency = sle->getFieldH160(xrpl::sfTakerPaysCurrency);
-            issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
-            book.in = issue;
-        }
-#ifndef EDGY_XAHAU
-        else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
-        {
-            book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
-        }
-#endif
-        else
-        {
-            return;
-        }
-
-        if (sle->isFieldPresent(xrpl::sfTakerGetsCurrency))
-        {
-            xrpl::Issue issue;
-            issue.currency = sle->getFieldH160(xrpl::sfTakerGetsCurrency);
-            issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
-            book.out = issue;
-        }
-#ifndef EDGY_XAHAU
-        else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
-        {
-            book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
-        }
-#endif
-        else
-        {
-            return;
-        }
-#ifndef EDGY_XAHAU
-        book.domain = (*sle)[~xrpl::sfDomainID];
-#endif
-        addOrderBook(book);
-        std::uint64_t q = xrpl::getQuality(sle->key());
-        if (sle->isFieldPresent(xrpl::sfExchangeRate))
-            q = sle->getFieldU64(xrpl::sfExchangeRate);
+        if (auto book = bookFromDir(*sle))
         {
             std::lock_guard const lock(lock_);
-            setQualityUnlocked(book, q);
+            setDirQualityUnlocked(*book, dirQuality(*sle));
         }
+        return;
+    }
+
+    if (auto book = bookFromOffer(*sle))
+    {
+        auto const pays = sle->getFieldAmount(xrpl::sfTakerPays);
+        auto const gets = sle->getFieldAmount(xrpl::sfTakerGets);
+        auto const q = xrpl::getRate(gets, pays);
+        std::lock_guard const lock(lock_);
+        noteOfferUnlocked(*book, q, amountAsDouble(gets));
         return;
     }
 
@@ -185,8 +319,9 @@ LocalOrderBooks::addFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
             return;
         auto const asset1 = (*sle)[xrpl::sfAsset];
         auto const asset2 = (*sle)[xrpl::sfAsset2];
-        addOrderBook(makeBook(asset1, asset2));
-        addOrderBook(makeBook(asset2, asset1));
+        std::lock_guard const lock(lock_);
+        markAmmUnlocked(makeBook(asset1, asset2));
+        markAmmUnlocked(makeBook(asset2, asset1));
     }
 }
 
@@ -196,49 +331,23 @@ LocalOrderBooks::removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
     if (!sle)
         return;
 
-    if (sle->getType() == xrpl::ltDIR_NODE && sle->isFieldPresent(xrpl::sfExchangeRate) &&
-        sle->isFieldPresent(xrpl::sfRootIndex) && sle->getFieldH256(xrpl::sfRootIndex) == sle->key())
+    if (isBookDirRoot(*sle))
     {
-        xrpl::Book book;
-        if (sle->isFieldPresent(xrpl::sfTakerPaysCurrency))
+        if (auto book = bookFromDir(*sle))
         {
-            xrpl::Issue issue;
-            issue.currency = sle->getFieldH160(xrpl::sfTakerPaysCurrency);
-            issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
-            book.in = issue;
+            std::lock_guard const lock(lock_);
+            removeBookUnlocked(*book);
         }
-#ifndef EDGY_XAHAU
-        else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
-        {
-            book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
-        }
-#endif
-        else
-        {
-            return;
-        }
-        if (sle->isFieldPresent(xrpl::sfTakerGetsCurrency))
-        {
-            xrpl::Issue issue;
-            issue.currency = sle->getFieldH160(xrpl::sfTakerGetsCurrency);
-            issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
-            book.out = issue;
-        }
-#ifndef EDGY_XAHAU
-        else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
-        {
-            book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
-        }
-#endif
-        else
-        {
-            return;
-        }
-#ifndef EDGY_XAHAU
-        book.domain = (*sle)[~xrpl::sfDomainID];
-#endif
+        return;
+    }
+
+    if (auto book = bookFromOffer(*sle))
+    {
+        auto const pays = sle->getFieldAmount(xrpl::sfTakerPays);
+        auto const gets = sle->getFieldAmount(xrpl::sfTakerGets);
+        auto const q = xrpl::getRate(gets, pays);
         std::lock_guard const lock(lock_);
-        removeBookUnlocked(book);
+        forgetOfferUnlocked(*book, q);
         return;
     }
 
@@ -284,94 +393,98 @@ LocalOrderBooks::setup(std::shared_ptr<xrpl::ReadView const> const& ledger)
     decltype(tipQuality_) tipQuality;
     decltype(tokenTip_) tokenTip;
 
+    auto addAdj = [&](xrpl::Book const& book) {
+#ifndef EDGY_XAHAU
+        if (book.domain)
+        {
+            domainBooks[{book.in, *book.domain}].insert(book.out);
+            reverseDomainBooks[{book.out, *book.domain}].insert(book.in);
+            if (xrpl::isXRP(book.out))
+                xrpDomainBooks.insert({book.in, *book.domain});
+            return;
+        }
+#endif
+        allBooks[book.in].insert(book.out);
+        reverseBooks[book.out].insert(book.in);
+        tokenFwd[xrpl::PathAsset{book.in}].insert(book.out);
+        tokenRev[xrpl::PathAsset{book.out}].insert(book.in);
+        if (xrpl::isXRP(book.out))
+            xrpBooks.insert(book.in);
+    };
+
+    auto setDir = [&](xrpl::Book const& book, std::uint64_t q) {
+        addAdj(book);
+        auto& edge = tipQuality[book];
+        if (edge.quality != q)
+            edge.outSize = 0;
+        edge.quality = q;
+#ifndef EDGY_XAHAU
+        if (book.domain)
+            return;
+#endif
+        auto& tok = tokenTip[xrpl::PathAsset{book.in}][book.out];
+        if (tok.quality != q)
+            tok.outSize = 0;
+        tok.quality = q;
+    };
+
+    auto noteOffer = [&](xrpl::Book const& book, std::uint64_t q, double size) {
+        addAdj(book);
+        auto apply = [&](BookEdge& edge) {
+            if (q < edge.quality)
+            {
+                edge.quality = q;
+                edge.outSize = size;
+            }
+            else if (q == edge.quality && size > edge.outSize)
+            {
+                edge.outSize = size;
+            }
+        };
+        apply(tipQuality[book]);
+#ifndef EDGY_XAHAU
+        if (book.domain)
+            return;
+#endif
+        apply(tokenTip[xrpl::PathAsset{book.in}][book.out]);
+    };
+
+    auto markAmm = [&](xrpl::Book const& book) {
+        addAdj(book);
+        tipQuality[book].amm = true;
+#ifndef EDGY_XAHAU
+        if (book.domain)
+            return;
+#endif
+        tokenTip[xrpl::PathAsset{book.in}][book.out].amm = true;
+    };
+
     if (ledger)
     {
         for (auto const& sle : ledger->sles)
         {
-            if (sle->getType() == xrpl::ltDIR_NODE && sle->isFieldPresent(xrpl::sfExchangeRate) &&
-                sle->getFieldH256(xrpl::sfRootIndex) == sle->key())
+            if (isBookDirRoot(*sle))
             {
-                xrpl::Book book;
-                if (sle->isFieldPresent(xrpl::sfTakerPaysCurrency))
-                {
-                    xrpl::Issue issue;
-                    issue.currency = sle->getFieldH160(xrpl::sfTakerPaysCurrency);
-                    issue.account = sle->getFieldH160(xrpl::sfTakerPaysIssuer);
-                    book.in = issue;
-                }
-#ifndef EDGY_XAHAU
-                else if (sle->isFieldPresent(xrpl::sfTakerPaysMPT))
-                {
-                    book.in = sle->getFieldH192(xrpl::sfTakerPaysMPT);
-                }
-#endif
-                else
-                {
-                    continue;
-                }
-                if (sle->isFieldPresent(xrpl::sfTakerGetsCurrency))
-                {
-                    xrpl::Issue issue;
-                    issue.currency = sle->getFieldH160(xrpl::sfTakerGetsCurrency);
-                    issue.account = sle->getFieldH160(xrpl::sfTakerGetsIssuer);
-                    book.out = issue;
-                }
-#ifndef EDGY_XAHAU
-                else if (sle->isFieldPresent(xrpl::sfTakerGetsMPT))
-                {
-                    book.out = sle->getFieldH192(xrpl::sfTakerGetsMPT);
-                }
-#endif
-                else
-                {
-                    continue;
-                }
-#ifndef EDGY_XAHAU
-                book.domain = (*sle)[~xrpl::sfDomainID];
-                if (book.domain)
-                {
-                    domainBooks[{book.in, *book.domain}].insert(book.out);
-                    reverseDomainBooks[{book.out, *book.domain}].insert(book.in);
-                    if (xrpl::isXRP(book.out))
-                        xrpDomainBooks.insert({book.in, *book.domain});
-                }
-                else
-#endif
-                {
-                    allBooks[book.in].insert(book.out);
-                    reverseBooks[book.out].insert(book.in);
-                    tokenFwd[xrpl::PathAsset{book.in}].insert(book.out);
-                    tokenRev[xrpl::PathAsset{book.out}].insert(book.in);
-                    if (xrpl::isXRP(book.out))
-                        xrpBooks.insert(book.in);
-                    std::uint64_t q = xrpl::getQuality(sle->key());
-                    if (sle->isFieldPresent(xrpl::sfExchangeRate))
-                        q = sle->getFieldU64(xrpl::sfExchangeRate);
-                    auto [it, ins] = tipQuality.emplace(book, q);
-                    if (!ins && q < it->second)
-                        it->second = q;
-                    auto& byOut = tokenTip[xrpl::PathAsset{book.in}];
-                    auto [tit, tins] = byOut.emplace(book.out, q);
-                    if (!tins && q < tit->second)
-                        tit->second = q;
-                }
+                if (auto book = bookFromDir(*sle))
+                    setDir(*book, dirQuality(*sle));
+            }
+            else if (auto book = bookFromOffer(*sle))
+            {
+                auto const pays = sle->getFieldAmount(xrpl::sfTakerPays);
+                auto const gets = sle->getFieldAmount(xrpl::sfTakerGets);
+                noteOffer(*book, xrpl::getRate(gets, pays), amountAsDouble(gets));
             }
             else if (sle->getType() == xrpl::ltAMM)
             {
+                if (!sle->isFieldPresent(xrpl::sfAsset) || !sle->isFieldPresent(xrpl::sfAsset2))
+                    continue;
+                if (sle->isFieldPresent(xrpl::sfLPTokenBalance) &&
+                    sle->getFieldAmount(xrpl::sfLPTokenBalance).signum() == 0)
+                    continue;
                 auto const asset1 = (*sle)[xrpl::sfAsset];
                 auto const asset2 = (*sle)[xrpl::sfAsset2];
-                allBooks[asset1].insert(asset2);
-                allBooks[asset2].insert(asset1);
-                reverseBooks[asset2].insert(asset1);
-                reverseBooks[asset1].insert(asset2);
-                tokenFwd[xrpl::PathAsset{asset1}].insert(asset2);
-                tokenFwd[xrpl::PathAsset{asset2}].insert(asset1);
-                tokenRev[xrpl::PathAsset{asset2}].insert(asset1);
-                tokenRev[xrpl::PathAsset{asset1}].insert(asset2);
-                if (xrpl::isXRP(asset2))
-                    xrpBooks.insert(asset1);
-                if (xrpl::isXRP(asset1))
-                    xrpBooks.insert(asset2);
+                markAmm(makeBook(asset1, asset2));
+                markAmm(makeBook(asset2, asset1));
             }
         }
     }
@@ -528,23 +641,56 @@ LocalOrderBooks::neighbors(
     return {merged.begin(), merged.end()};
 }
 
+std::vector<xrpl::Asset>
+LocalOrderBooks::predecessors(
+    xrpl::Asset const& out,
+    std::optional<xrpl::Domain> const& domain) const
+{
+    std::lock_guard const lock(lock_);
+    xrpl::hardened_hash_set<xrpl::Asset> merged;
+    if (!domain)
+    {
+        if (auto it = reverseBooks_.find(out); it != reverseBooks_.end())
+            merged.insert(it->second.begin(), it->second.end());
+        if (auto it = tokenRev_.find(xrpl::PathAsset{out}); it != tokenRev_.end())
+            merged.insert(it->second.begin(), it->second.end());
+    }
+    else if (auto it = reverseDomainBooks_.find({out, *domain}); it != reverseDomainBooks_.end())
+    {
+        merged.insert(it->second.begin(), it->second.end());
+    }
+    return {merged.begin(), merged.end()};
+}
+
+BookEdge
+LocalOrderBooks::tip(
+    xrpl::Asset const& in,
+    xrpl::Asset const& out,
+    std::optional<xrpl::Domain> const& domain) const
+{
+    std::lock_guard const lock(lock_);
+    BookEdge best;
+    xrpl::Book const book = makeBook(in, out, domain);
+    if (auto it = tipQuality_.find(book); it != tipQuality_.end())
+        best = it->second;
+    if (!domain)
+    {
+        if (auto tit = tokenTip_.find(xrpl::PathAsset{in}); tit != tokenTip_.end())
+        {
+            if (auto oit = tit->second.find(out); oit != tit->second.end())
+                mergeBetter(best, oit->second);
+        }
+    }
+    return best;
+}
+
 std::uint64_t
 LocalOrderBooks::tipQuality(
     xrpl::Asset const& in,
     xrpl::Asset const& out,
     std::optional<xrpl::Domain> const& domain) const
 {
-    std::lock_guard const lock(lock_);
-    std::uint64_t best = kNoQuality;
-    xrpl::Book const book = makeBook(in, out, domain);
-    if (auto it = tipQuality_.find(book); it != tipQuality_.end())
-        best = it->second;
-    if (auto tit = tokenTip_.find(xrpl::PathAsset{in}); tit != tokenTip_.end())
-    {
-        if (auto oit = tit->second.find(out); oit != tit->second.end() && oit->second < best)
-            best = oit->second;
-    }
-    return best;
+    return tip(in, out, domain).quality;
 }
 
 std::size_t
