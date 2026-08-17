@@ -69,6 +69,30 @@ find_package(mpt-crypto REQUIRED)
 find_package(lz4 REQUIRED)
 find_package(LibArchive REQUIRED)
 
+# Boost.Stacktrace from_exception redefines __cxa_allocate_exception.
+# That is fine with a shared libstdc++; it is a multiple-definition (or a
+# throw-time segfault) with -static-libstdc++. Drop it from the umbrella.
+foreach(_st IN ITEMS boost::stacktrace_from_exception Boost::stacktrace_from_exception)
+    if(TARGET ${_st})
+        set_property(TARGET ${_st} PROPERTY INTERFACE_LINK_LIBRARIES "")
+        foreach(_cfg IN ITEMS "" _RELEASE _DEBUG _RELWITHDEBINFO _MINSIZEREL)
+            set_property(TARGET ${_st} PROPERTY IMPORTED_LOCATION${_cfg} "")
+        endforeach()
+    endif()
+endforeach()
+foreach(_umbrella IN ITEMS boost::boost Boost::boost)
+    if(TARGET ${_umbrella})
+        get_target_property(_boost_libs ${_umbrella} INTERFACE_LINK_LIBRARIES)
+        if(_boost_libs)
+            list(FILTER _boost_libs EXCLUDE REGEX "stacktrace_from_exception")
+            set_property(TARGET ${_umbrella} PROPERTY INTERFACE_LINK_LIBRARIES "${_boost_libs}")
+        endif()
+    endif()
+endforeach()
+if(Boost_LIBRARIES)
+    list(FILTER Boost_LIBRARIES EXCLUDE REGEX "stacktrace_from_exception")
+endif()
+
 set(EDGY_COMMON_SOURCES
     src/edgy/config.cpp
     src/edgy/memory_ledger.cpp

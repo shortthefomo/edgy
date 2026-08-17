@@ -11,6 +11,7 @@
 #include <boost/asio/signal_set.hpp>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -20,6 +21,12 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(__linux__)
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -109,11 +116,62 @@ private:
     std::optional<TeeBuf> tee_;
 };
 
+#if defined(__linux__)
+void
+installCrashHandler()
+{
+    auto handler = [](int sig) {
+        char const* name = "SIGNAL";
+        switch (sig)
+        {
+            case SIGSEGV:
+                name = "SIGSEGV";
+                break;
+            case SIGABRT:
+                name = "SIGABRT";
+                break;
+            case SIGBUS:
+                name = "SIGBUS";
+                break;
+            case SIGILL:
+                name = "SIGILL";
+                break;
+            case SIGFPE:
+                name = "SIGFPE";
+                break;
+            default:
+                break;
+        }
+        char buf[80];
+        int const n = std::snprintf(
+            buf, sizeof(buf), "edgy: fatal %s (%d), backtrace:\n", name, sig);
+        if (n > 0)
+            ::write(STDERR_FILENO, buf, static_cast<std::size_t>(n));
+        void* frames[64];
+        int const depth = ::backtrace(frames, 64);
+        ::backtrace_symbols_fd(frames, depth, STDERR_FILENO);
+        ::_exit(128 + sig);
+    };
+    struct sigaction sa {};
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+    sigaction(SIGILL, &sa, nullptr);
+    sigaction(SIGFPE, &sa, nullptr);
+}
+#endif
+
 }  // namespace
 
 int
 main(int argc, char** argv)
 {
+#if defined(__linux__)
+    installCrashHandler();
+#endif
     try
     {
         auto cfg = edgy::Config::fromArgs(argc, argv);

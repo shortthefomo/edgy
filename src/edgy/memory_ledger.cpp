@@ -462,10 +462,16 @@ LedgerBuilder::upsert(std::shared_ptr<xrpl::SLE const> sle)
 {
     if (!sle)
         return;
+    // Copy the key before moving `sle` into `item`. `put(item.sle->key(),
+    // std::move(item))` is unsequenced: GCC 15 evaluates the move first, then
+    // folds the empty shared_ptr to nullptr+offsetof(key_) == 0x30, and the
+    // first overlay insert memcmp's that address (SIGSEGV after the first
+    // closed ledger).
+    xrpl::uint256 const key = sle->key();
     MemoryLedger::Item item;
     item.blob = serializeSle(sle);
     item.sle = std::move(sle);
-    put(item.sle->key(), std::move(item));
+    put(key, std::move(item));
 }
 
 void
