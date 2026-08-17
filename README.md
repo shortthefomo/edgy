@@ -71,7 +71,7 @@ Edit `[node]` in each file to the matching node WebSocket. A full XRPL mainnet s
 
 ## Build
 
-See [`BUILD.md`](BUILD.md). After a local Release build the binaries are `.build/edgy-xrpld` and `.build/edgy-xahaud`.
+See [`BUILD.md`](BUILD.md). After a local Release build the binaries are `.build/edgy-xrpld` and `.build/edgy-xahaud`. Linux x86_64 release binaries are built the same way xahaud does it — Docker in, stripped files out — via `./release-builder.sh` (see BUILD.md).
 
 ## Run
 

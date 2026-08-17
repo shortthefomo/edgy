@@ -1,0 +1,59 @@
+# Linux x86_64 binaries, same shape as xahaud's Docker release builder.
+# Produces edgy-xrpld-*-linux-x64 and edgy-xahaud-*-linux-x64.
+name: Linux release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout edgy
+        uses: actions/checkout@v4
+
+      - name: Checkout rippled
+        uses: actions/checkout@v4
+        with:
+          repository: XRPLF/rippled
+          ref: develop
+          path: .deps/rippled
+
+      - name: Checkout xahaud
+        uses: actions/checkout@v4
+        with:
+          repository: Xahau/xahaud
+          ref: dev
+          path: .deps/xahaud
+
+      - name: Build Linux binaries
+        env:
+          RIPPLED_ROOT: ${{ github.workspace }}/.deps/rippled
+          XAHAUD_ROOT: ${{ github.workspace }}/.deps/xahaud
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./release-builder.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edgy-linux-x64
+          path: release-build/*
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.ref_name }}" release-build/* --clobber

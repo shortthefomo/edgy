@@ -225,6 +225,24 @@ rippled also has a *product* release: bump `versionString` in `BuildInfo.cpp`, t
 | Tag `X.Y.Z`, GitHub Release | Tag `vX.Y.Z`, attach `.build/edgy-xrpld` and `.build/edgy-xahaud` |
 | `package/` deb/rpm + `on-tag.yml` | Skip until there is more than one installer |
 
+### Linux x86_64 (xahaud-style Docker builder)
+
+xahaud ships Linux by running Conan + CMake inside Docker and copying a stripped binary out. Edgy copies that wrapper, not their Holy Build Box image — HBB is GCC 11 / C++20, and this tree plus current rippled need **GCC 15 / C++23**.
+
+From the repo root, with Docker:
+
+```bash
+./release-builder.sh
+# release-build/edgy-xrpld-<ver>-linux-x64
+# release-build/edgy-xahaud-<ver>-linux-x64
+```
+
+Uses `../rippled` and `../xahaud` when those trees exist; otherwise clones `XRPLF/rippled@develop` and `Xahau/xahaud@dev` into `.deps/`. Upstream object files go in each tree’s `.build-linux/` so a macOS `.build/` is left alone.
+
+On Apple Silicon, Docker builds `linux/amd64` (qemu). That is slow; the GitHub Action `Linux release` is the native path. It runs on `v*` tags and `workflow_dispatch`, then attaches `*-linux-x64` to the GitHub Release.
+
+`PLATFORM=linux/arm64 ./release-builder.sh` builds `*-linux-arm64` instead.
+
 Current release is `0.1.6`. After that tag, develop is `0.1.7-b0`. To cut the next release:
 
 ```bash
