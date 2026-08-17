@@ -46,16 +46,16 @@ Other platforms should [build from source](BUILD.md) until matching assets are a
 
 ```bash
 # after a two-binary release is published, pick both asset names from the page
-VER=0.1.5
+VER=0.1.6
 curl -L -o edgy-xrpld \
   "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-xrpld-${VER}-darwin-arm64"
 curl -L -o edgy-xahaud \
   "https://github.com/shortthefomo/edgy/releases/download/v${VER}/edgy-xahaud-${VER}-darwin-arm64"
 chmod +x edgy-xrpld edgy-xahaud
 ./edgy-xrpld --version
-# edgy 0.1.5+xrpld.<git>
+# edgy 0.1.6+xrpld.<git>
 ./edgy-xahaud --version
-# edgy 0.1.5+xahaud.<git>
+# edgy 0.1.6+xahaud.<git>
 ```
 
 Starter configs from the same tag (or copy from a clone):
