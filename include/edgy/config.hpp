@@ -82,4 +82,10 @@ struct Config
     fromArgs(int argc, char** argv);
 };
 
+// If `path` exists and is a non-empty file, rename it to
+// `path.YYYYMMDD-HHMMSS` so the next open is a fresh log. Returns the
+// backup path, or empty when nothing was moved.
+[[nodiscard]] std::string
+rotateDebugLog(std::string const& path);
+
 }  // namespace edgy

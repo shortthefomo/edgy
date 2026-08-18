@@ -8,6 +8,7 @@
 #include <xrpl/protocol/digest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <utility>
 
 namespace edgy {
@@ -222,14 +223,20 @@ MemoryLedger::firstKey() const
 std::shared_ptr<xrpl::SLE const>
 MemoryLedger::materialize(xrpl::uint256 const& key, Item const& item) const
 {
-    std::mutex& mutex =
-        overlay_->contains(key) ? decodeMutex_ : base_->decodeMutex;
-    std::lock_guard const lock(mutex);
-    if (item.sle)
-        return item.sle;
-
-    item.sle = sleFromBlob(item.blob, key);
-    return item.sle;
+    // Hits must not take decodeMutex — every BookTip / RippleCalc / CLOB
+    // read used to serialize 100 path_find workers on this one lock.
+    if (auto hit = std::atomic_load_explicit(&item.sle, std::memory_order_acquire))
+        return hit;
+    std::shared_ptr<xrpl::SLE const> decoded = sleFromBlob(item.blob, key);
+    std::shared_ptr<xrpl::SLE const> empty;
+    if (std::atomic_compare_exchange_strong_explicit(
+            &item.sle,
+            &empty,
+            decoded,
+            std::memory_order_release,
+            std::memory_order_acquire))
+        return decoded;
+    return std::atomic_load_explicit(&item.sle, std::memory_order_acquire);
 }
 
 std::shared_ptr<xrpl::SLE const>

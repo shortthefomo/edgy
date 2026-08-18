@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -236,7 +237,8 @@ bestPaidQuote(
     std::optional<xrpl::uint256> const& domain,
     PathServices& services,
     xrpl::path::RippleCalc::Input const& rcInput,
-    bool convertAll)
+    bool convertAll,
+    bool isolateHops = true)
 {
     // Isolate-rank dest, the XRP bridge, and each found hop so a junk
     // 4-hop set cannot hide RLUSD→XRP. Then Flow the working set
@@ -244,6 +246,24 @@ bestPaidQuote(
     // with default paths on. Quoting each hop alone walks one book for
     // the full dest and loses the tip of the other five (slightly worse
     // rate on most swaps).
+    // Revalidate already has the six: one combined Flow is the Payment
+    // quote. Per-hop RippleCalc of send_max was seconds on deep books.
+    if (!isolateHops && !found.empty())
+    {
+        auto combined = runPaidQuote(
+            ledger,
+            saMax,
+            dstAmount,
+            dst,
+            src,
+            found,
+            domain,
+            services,
+            withDefaultPaths(rcInput, true),
+            &found);
+        if (combined.ok)
+            return combined;
+    }
     PaidQuote isolated;
     auto const dest = dstAmount.asset();
     auto const srcAsset = saMax.asset();
@@ -378,6 +398,8 @@ quoteConvertAll(
             if (!clobWalkIsFault(walk))
                 return;
             best.clobWalkFault = true;
+            static std::mutex logMu;
+            std::lock_guard const lock(logMu);
             std::cerr << "invariant clob_walk " << clobWalkWhyText(walk.why)
                       << " dirs=" << walk.dirs << " offers=" << walk.offers
                       << " taken=" << walk.taken
@@ -385,12 +407,12 @@ quoteConvertAll(
                       << " skipped=" << walk.skippedOther << '\n';
         };
         takeClob(
-            clobBookTake(*ledger, makeBook(saMax.asset(), destAsset), saMax),
+            clobBookTake(*ledger, makeBook(saMax.asset(), destAsset, domain), saMax),
             directDestPath(destAsset));
         if (!xrpl::isXRP(saMax.asset()) && !xrpl::isXRP(destAsset))
         {
             takeClob(
-                nativeBridgeClobOut(*ledger, saMax, destAsset),
+                nativeBridgeClobOut(*ledger, saMax, destAsset, domain),
                 xrpBridgePath(destAsset));
         }
     }
@@ -863,7 +885,8 @@ PathSession::revalidatePaths(
             domain_,
             registry_,
             rcInput,
-            convertAll_);
+            convertAll_,
+            false);
         if (best.ok)
             context_[asset] = cappedPaths(mergePaths(best.paths, paths));
     }
@@ -1064,7 +1087,7 @@ PathSession::findPaths(
                                   << " ranked=" << found.ranked << " kept=" << ps.size()
                                   << " search=" << found.search.count()
                                   << "ms rank=" << found.rank.count() << "ms";
-            if (ms.count() >= 50)
+            if (ms.count() >= 250)
             {
                 std::cerr << "path_find depth=" << budget.depth << " " << found.candidates
                           << " candidates, " << ps.size() << " paths, " << ms.count()
@@ -1206,7 +1229,7 @@ PathSession::findPaths(
         jvArray.append(std::move(e));
     auto const totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - tAll);
-    if (totalMs.count() >= 50)
+    if (totalMs.count() >= 250)
     {
         std::cerr << "path_find depth=" << budget.depth << " total " << totalMs.count()
                   << "ms sources=" << sourceAssets.size() << " alts=" << jvArray.size() << '\n';

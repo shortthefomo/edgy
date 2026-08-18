@@ -1291,9 +1291,9 @@ Engine::applyLedgerClosed(json::Value const& msg)
         if (handler)
             handler(std::move(closed));
     }
-    // Reprice only. A full search of every live session on close
-    // convoyed the worker pool at 50–100 sockets.
-    notifySubscriptions(true);
+    // Reprice, and let a couple of sockets rediscover hops. Mid-close
+    // ticks must not FastPathFinder — that convoyed 100 sessions.
+    notifySubscriptions(true, true);
 }
 
 void
@@ -1643,11 +1643,11 @@ Engine::midCloseTick()
         return;
     if (dirty_.exchange(false, std::memory_order_acq_rel))
         publishBuilder(false);
-    notifySubscriptions(true);
+    notifySubscriptions(true, false);
 }
 
 void
-Engine::notifySubscriptions(bool revalidateOnly)
+Engine::notifySubscriptions(bool revalidateOnly, bool allowDeepen)
 {
     if (stop_.load() || !pool_)
         return;
@@ -1675,7 +1675,7 @@ Engine::notifySubscriptions(bool revalidateOnly)
     if (auto const view = cache->getLedger())
         ledgerSeq = view->seq();
 
-    int deepenLeft = 6;
+    int deepenLeft = pathDeepenBudget(allowDeepen);
     for (auto const& sub : live)
     {
         if (!sub.session->tryBeginUpdate())

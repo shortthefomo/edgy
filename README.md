@@ -170,7 +170,7 @@ On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_
 | `[net-threads]` | Network event-loop threads (default 4). Not disk. |
 | `[update-ms]` | Open-socket reprice interval (default 100) |
 | `[proxy]` / `--no-proxy` | Forward unknown commands (default 1) |
-| `[debug]` / `--debug` | Append diagnostics to this file (`[debug_logfile]` also accepted) |
+| `[debug]` / `--debug` | Diagnostic log (`[debug_logfile]` also accepted). On each start the previous file is renamed `path.YYYYMMDD-HHMMSS` and a fresh log is opened. |
 | `[search]` / `--search` | Target / one-shot depth: `full` (default), `fast`, `mid`, or 0–4 |
 | `[search-fast]` / `--search-fast` | First WebSocket reply depth (default `full`) |
 | `[timeout-ms]` / `--timeout-ms` | Abort one search after N ms (`0` / `full` = none) |

@@ -92,7 +92,8 @@ public:
     {
         if (path.empty())
             return;
-        file_.open(path, std::ios::out | std::ios::app);
+        (void)edgy::rotateDebugLog(path);
+        file_.open(path, std::ios::out | std::ios::trunc);
         if (!file_)
             throw std::runtime_error("cannot open debug log: " + path);
         prev_ = std::cerr.rdbuf();

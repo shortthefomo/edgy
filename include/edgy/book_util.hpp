@@ -219,12 +219,13 @@ struct ClobWalkResult
     }
 };
 
-// Silent nullopt that hid a live book (dirs or offers present, or a throw).
+// A throw is the only walk bug (leftover-dust used to abort the fill).
+// EmptyBook with dirs/offers is a dry CLOB (expired, missing SLE, unfunded)
+// and is common on a live ledger — not an invariant.
 [[nodiscard]] inline bool
 clobWalkIsFault(ClobWalkResult const& r) noexcept
 {
-    return r.why == ClobWalkWhy::Threw ||
-        (r.why == ClobWalkWhy::EmptyBook && (r.dirs > 0 || r.offers > 0));
+    return r.why == ClobWalkWhy::Threw;
 }
 
 // Spend `want` down a CLOB (no AMM).
@@ -347,7 +348,8 @@ clobBookTake(
 nativeBridgeClobOut(
     xrpl::ReadView const& view,
     xrpl::STAmount const& saMax,
-    xrpl::Asset const& destAsset)
+    xrpl::Asset const& destAsset,
+    std::optional<xrpl::uint256> const& domain = std::nullopt)
 {
     ClobWalkResult r;
     if (!saMax.holds<xrpl::Issue>() || xrpl::isXRP(saMax) || xrpl::isXRP(destAsset))
@@ -356,10 +358,10 @@ nativeBridgeClobOut(
         return r;
     }
     auto const native = xrpl::xrpIssue();
-    auto first = clobBookTake(view, makeBook(saMax.asset(), native), saMax);
+    auto first = clobBookTake(view, makeBook(saMax.asset(), native, domain), saMax);
     if (!first.ok())
         return first;
-    auto second = clobBookTake(view, makeBook(native, destAsset), *first.out);
+    auto second = clobBookTake(view, makeBook(native, destAsset, domain), *first.out);
     second.dirs += first.dirs;
     second.offers += first.offers;
     second.taken += first.taken;

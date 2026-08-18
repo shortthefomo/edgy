@@ -280,6 +280,14 @@ struct EdgeQuote
     double outSize{0};
 };
 
+using AmmCache = std::unordered_map<std::string, std::optional<AmmQuote>>;
+
+std::string
+ammCacheKey(xrpl::Asset const& in, xrpl::Asset const& out)
+{
+    return to_string(in) + '>' + to_string(out);
+}
+
 EdgeQuote
 quoteEdge(
     LocalOrderBooks& books,
@@ -287,7 +295,8 @@ quoteEdge(
     xrpl::Asset const& in,
     xrpl::Asset const& out,
     std::optional<xrpl::uint256> const& domain,
-    double outNeeded)
+    double outNeeded,
+    AmmCache& ammCache)
 {
     EdgeQuote q;
     auto const tip = books.tip(in, out, domain);
@@ -296,12 +305,16 @@ quoteEdge(
     q.outSize = tip.outSize;
     if (tip.amm)
     {
-        if (auto amm = ammQuote(ledger, in, out, outNeeded))
+        auto const key = ammCacheKey(in, out);
+        auto it = ammCache.find(key);
+        if (it == ammCache.end())
+            it = ammCache.emplace(key, ammQuote(ledger, in, out, outNeeded)).first;
+        if (it->second)
         {
-            if (amm->quality > q.quality)
-                q.quality = amm->quality;
-            if (amm->outSize > q.outSize)
-                q.outSize = amm->outSize;
+            if (it->second->quality > q.quality)
+                q.quality = it->second->quality;
+            if (it->second->outSize > q.outSize)
+                q.outSize = it->second->outSize;
         }
         else if (tip.quality == LocalOrderBooks::kNoQuality)
         {
@@ -328,7 +341,8 @@ scoreHops(
     std::vector<xrpl::Asset> hops,
     std::optional<xrpl::uint256> const& domain,
     double destNeeded,
-    std::optional<xrpl::Quality> const& bound)
+    std::optional<xrpl::Quality> const& bound,
+    AmmCache& ammCache)
 {
     if (hops.empty() || hops.size() > static_cast<std::size_t>(SearchBudget::kMaxPathLength))
         return std::nullopt;
@@ -340,7 +354,7 @@ scoreHops(
     for (std::size_t i = hops.size(); i-- > 0;)
     {
         auto const in = (i == 0) ? srcAsset : hops[i - 1];
-        quotes[i] = quoteEdge(books, ledger, in, hops[i], domain, needed[i]);
+        quotes[i] = quoteEdge(books, ledger, in, hops[i], domain, needed[i], ammCache);
         if (i > 0)
         {
             auto const ratio = qualityRatio(quotes[i].quality);
@@ -580,13 +594,22 @@ FastPathFinder::search(
     std::vector<PathScore> longHops;
     shortHops.reserve(static_cast<std::size_t>(budget.twoHop) + 8);
     longHops.reserve(static_cast<std::size_t>(budget.twoHop) + 8);
+    AmmCache ammCache;
 
     auto consider = [&](std::vector<xrpl::Asset> hops) {
         if (continueCallback && !continueCallback())
             return;
         auto const n = hops.size();
         if (auto s = scoreHops(
-                books, ledger, srcAsset, dstAsset, std::move(hops), domain, destNeeded, bound))
+                books,
+                ledger,
+                srcAsset,
+                dstAsset,
+                std::move(hops),
+                domain,
+                destNeeded,
+                bound,
+                ammCache))
         {
             if (sendIn > 0)
             {
@@ -615,8 +638,31 @@ FastPathFinder::search(
     if (!srcIsXrp && !dstIsXrp && srcAsset != dstAsset)
         consider({xrp, dstAsset});
 
-    // Score 2-hop meets. Wave 0 walks every mid; later waves take a
-    // rotated window so rediscovery stays cheap and still finds new hubs.
+    // Cap 2-hop scoring at twoHop even on wave 0. Walking every mid on
+    // a well-connected pair (XRP dest) was 500–1200ms. Fattest hubs
+    // first so USD.GateHub still ranks when we drop the tail. Later
+    // waves rotate through the rest.
+    auto takeMids = [&](std::vector<xrpl::Asset> mids) {
+        int const n = static_cast<int>(mids.size());
+        if (n <= budget.twoHop)
+            return mids;
+        std::ranges::sort(mids, [&](xrpl::Asset const& a, xrpl::Asset const& b) {
+            return books.getBookSize(a, domain) > books.getBookSize(b, domain);
+        });
+        if (budget.exploreWave <= 0)
+        {
+            mids.resize(static_cast<std::size_t>(budget.twoHop));
+            return mids;
+        }
+        int const start =
+            (budget.exploreWave * std::max(1, budget.twoHop / 2)) % n;
+        std::vector<xrpl::Asset> out;
+        out.reserve(static_cast<std::size_t>(budget.twoHop));
+        for (int i = 0; i < budget.twoHop; ++i)
+            out.push_back(mids[static_cast<std::size_t>((start + i) % n)]);
+        return out;
+    };
+
     {
         std::vector<xrpl::Asset> mids;
         for (auto const& mid : books.intermediates(srcAsset, dstAsset, domain))
@@ -628,40 +674,29 @@ FastPathFinder::search(
                 continue;
             mids.push_back(mid);
         }
-        int const n = static_cast<int>(mids.size());
-        int start = 0;
-        int count = n;
-        if (budget.exploreWave > 0 && n > budget.twoHop)
-        {
-            start = (budget.exploreWave * std::max(1, budget.twoHop / 2)) % n;
-            count = budget.twoHop;
-        }
-        for (int i = 0; i < count; ++i)
+        for (auto const& mid : takeMids(std::move(mids)))
         {
             if (continueCallback && !continueCallback())
                 break;
-            consider({mids[static_cast<std::size_t>((start + i) % n)], dstAsset});
+            consider({mid, dstAsset});
         }
     }
 
+    auto const shortEnough = [&] {
+        return static_cast<int>(shortHops.size()) >= SearchBudget::kMaxPathCount;
+    };
+
     auto walkMids = [&](std::vector<xrpl::Asset> mids, auto const& use) {
-        int const n = static_cast<int>(mids.size());
-        int start = 0;
-        int count = n;
-        if (budget.exploreWave > 0 && n > budget.twoHop)
-        {
-            start = ((budget.exploreWave + 1) * std::max(1, budget.twoHop / 2)) % n;
-            count = budget.twoHop;
-        }
-        for (int i = 0; i < count; ++i)
+        for (auto const& mid : takeMids(std::move(mids)))
         {
             if (continueCallback && !continueCallback())
                 break;
-            use(mids[static_cast<std::size_t>((start + i) % n)]);
+            use(mid);
         }
     };
 
-    if (maxHops >= 3 && !dstIsXrp && books.hasBook(xrp, dstAsset, domain))
+    if (maxHops >= 3 && !shortEnough() && !dstIsXrp &&
+        books.hasBook(xrp, dstAsset, domain))
     {
         std::vector<xrpl::Asset> mids;
         for (auto const& mid : books.intermediates(srcAsset, xrp, domain))
@@ -676,7 +711,8 @@ FastPathFinder::search(
         });
     }
 
-    if (maxHops >= 3 && !srcIsXrp && books.hasBook(srcAsset, xrp, domain))
+    if (maxHops >= 3 && !shortEnough() && !srcIsXrp &&
+        books.hasBook(srcAsset, xrp, domain))
     {
         std::vector<xrpl::Asset> mids;
         for (auto const& mid : books.intermediates(xrp, dstAsset, domain))
@@ -692,7 +728,7 @@ FastPathFinder::search(
     }
 
     // 4-hop meet-in-the-middle: src→A→B  ∩  X→M→dst with B==X.
-    if (maxHops >= 4)
+    if (maxHops >= 4 && !shortEnough())
     {
         struct Leg
         {
@@ -704,7 +740,7 @@ FastPathFinder::search(
         prefixes.reserve(static_cast<std::size_t>(budget.twoHop));
         suffixes.reserve(static_cast<std::size_t>(budget.twoHop));
 
-        int const legCap = std::max(budget.twoHop * 4, 32);
+        int const legCap = std::max(budget.twoHop, 32);
         int const skipPref =
             budget.exploreWave > 0 ? (budget.exploreWave * 8) % std::max(1, legCap) : 0;
         int nPref = 0;
@@ -733,7 +769,8 @@ FastPathFinder::search(
                         {a, b},
                         domain,
                         0,
-                        std::nullopt))
+                        std::nullopt,
+                        ammCache))
                 {
                     prefixes.push_back(Leg{std::move(*s), b});
                     ++nPref;
@@ -763,7 +800,8 @@ FastPathFinder::search(
                         {m, dstAsset},
                         domain,
                         destNeeded,
-                        bound))
+                        bound,
+                        ammCache))
                 {
                     suffixes.push_back(Leg{std::move(*s), x});
                     ++nSuf;
@@ -810,7 +848,7 @@ FastPathFinder::search(
     }
 
     // Longer leftover hops (5–8) from a capped BFS.
-    if (maxHops >= 5)
+    if (maxHops >= 5 && !shortEnough())
     {
         struct Frame
         {

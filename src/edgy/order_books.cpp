@@ -11,7 +11,9 @@
 #include <xrpl/protocol/UintTypes.h>
 
 #include <algorithm>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <utility>
 
 namespace edgy {
@@ -280,7 +282,7 @@ LocalOrderBooks::removeBookUnlocked(xrpl::Book const& book)
 void
 LocalOrderBooks::addOrderBook(xrpl::Book const& book)
 {
-    std::lock_guard const lock(lock_);
+    std::unique_lock const lock(lock_);
     addBookUnlocked(book);
 }
 
@@ -294,7 +296,7 @@ LocalOrderBooks::addFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
     {
         if (auto book = bookFromDir(*sle))
         {
-            std::lock_guard const lock(lock_);
+            std::unique_lock const lock(lock_);
             setDirQualityUnlocked(*book, dirQuality(*sle));
         }
         return;
@@ -305,7 +307,7 @@ LocalOrderBooks::addFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
         auto const pays = sle->getFieldAmount(xrpl::sfTakerPays);
         auto const gets = sle->getFieldAmount(xrpl::sfTakerGets);
         auto const q = xrpl::getRate(gets, pays);
-        std::lock_guard const lock(lock_);
+        std::unique_lock const lock(lock_);
         noteOfferUnlocked(*book, q, amountAsDouble(gets));
         return;
     }
@@ -319,7 +321,7 @@ LocalOrderBooks::addFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
             return;
         auto const asset1 = (*sle)[xrpl::sfAsset];
         auto const asset2 = (*sle)[xrpl::sfAsset2];
-        std::lock_guard const lock(lock_);
+        std::unique_lock const lock(lock_);
         markAmmUnlocked(makeBook(asset1, asset2));
         markAmmUnlocked(makeBook(asset2, asset1));
     }
@@ -335,7 +337,7 @@ LocalOrderBooks::removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
     {
         if (auto book = bookFromDir(*sle))
         {
-            std::lock_guard const lock(lock_);
+            std::unique_lock const lock(lock_);
             removeBookUnlocked(*book);
         }
         return;
@@ -346,7 +348,7 @@ LocalOrderBooks::removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
         auto const pays = sle->getFieldAmount(xrpl::sfTakerPays);
         auto const gets = sle->getFieldAmount(xrpl::sfTakerGets);
         auto const q = xrpl::getRate(gets, pays);
-        std::lock_guard const lock(lock_);
+        std::unique_lock const lock(lock_);
         forgetOfferUnlocked(*book, q);
         return;
     }
@@ -357,7 +359,7 @@ LocalOrderBooks::removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
             return;
         auto const asset1 = (*sle)[xrpl::sfAsset];
         auto const asset2 = (*sle)[xrpl::sfAsset2];
-        std::lock_guard const lock(lock_);
+        std::unique_lock const lock(lock_);
         removeBookUnlocked(makeBook(asset1, asset2));
         removeBookUnlocked(makeBook(asset2, asset1));
     }
@@ -366,7 +368,7 @@ LocalOrderBooks::removeFromSle(std::shared_ptr<xrpl::SLE const> const& sle)
 void
 LocalOrderBooks::clear()
 {
-    std::lock_guard const lock(lock_);
+    std::unique_lock const lock(lock_);
     allBooks_.clear();
     reverseBooks_.clear();
     domainBooks_.clear();
@@ -489,7 +491,7 @@ LocalOrderBooks::setup(std::shared_ptr<xrpl::ReadView const> const& ledger)
         }
     }
 
-    std::lock_guard const lock(lock_);
+    std::unique_lock const lock(lock_);
     allBooks_.swap(allBooks);
     reverseBooks_.swap(reverseBooks);
     xrpBooks_.swap(xrpBooks);
@@ -508,7 +510,7 @@ LocalOrderBooks::getBooksByTakerPays(
     std::optional<xrpl::Domain> const& domain)
 {
     std::vector<xrpl::Book> ret;
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     auto fill = [&](auto const& container, auto const& key) {
         if (auto it = container.find(key); it != container.end())
         {
@@ -527,7 +529,7 @@ LocalOrderBooks::getBooksByTakerPays(
 int
 LocalOrderBooks::getBookSize(xrpl::Asset const& asset, std::optional<xrpl::Domain> const& domain)
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     if (!domain)
     {
         if (auto it = allBooks_.find(asset); it != allBooks_.end())
@@ -543,7 +545,7 @@ LocalOrderBooks::getBookSize(xrpl::Asset const& asset, std::optional<xrpl::Domai
 bool
 LocalOrderBooks::isBookToXRP(xrpl::Asset const& asset, std::optional<xrpl::Domain> const& domain)
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     if (domain)
         return xrpDomainBooks_.contains({asset, *domain});
     return xrpBooks_.contains(asset);
@@ -555,7 +557,7 @@ LocalOrderBooks::hasBook(
     xrpl::Asset const& out,
     std::optional<xrpl::Domain> const& domain) const
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     if (!domain)
     {
         if (auto const it = allBooks_.find(in); it != allBooks_.end() && it->second.contains(out))
@@ -575,7 +577,7 @@ LocalOrderBooks::intermediates(
     xrpl::Asset const& dst,
     std::optional<xrpl::Domain> const& domain) const
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     xrpl::hardened_hash_set<xrpl::Asset> fwdSet;
     xrpl::hardened_hash_set<xrpl::Asset> revSet;
     xrpl::hardened_hash_set<xrpl::Asset> const* fwd = nullptr;
@@ -625,7 +627,7 @@ LocalOrderBooks::neighbors(
     xrpl::Asset const& in,
     std::optional<xrpl::Domain> const& domain) const
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     xrpl::hardened_hash_set<xrpl::Asset> merged;
     if (!domain)
     {
@@ -646,7 +648,7 @@ LocalOrderBooks::predecessors(
     xrpl::Asset const& out,
     std::optional<xrpl::Domain> const& domain) const
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     xrpl::hardened_hash_set<xrpl::Asset> merged;
     if (!domain)
     {
@@ -668,7 +670,7 @@ LocalOrderBooks::tip(
     xrpl::Asset const& out,
     std::optional<xrpl::Domain> const& domain) const
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     BookEdge best;
     xrpl::Book const book = makeBook(in, out, domain);
     if (auto it = tipQuality_.find(book); it != tipQuality_.end())
@@ -696,7 +698,7 @@ LocalOrderBooks::tipQuality(
 std::size_t
 LocalOrderBooks::bookCount() const
 {
-    std::lock_guard const lock(lock_);
+    std::shared_lock const lock(lock_);
     return tipQuality_.size();
 }
 

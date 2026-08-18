@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <optional>
 #include <vector>
 
@@ -138,7 +139,7 @@ private:
     void
     forgetOfferUnlocked(xrpl::Book const& book, std::uint64_t quality);
 
-    mutable std::mutex lock_;
+    mutable std::shared_mutex lock_;
     xrpl::hardened_hash_map<xrpl::Asset, xrpl::hardened_hash_set<xrpl::Asset>> allBooks_;
     xrpl::hardened_hash_map<xrpl::Asset, xrpl::hardened_hash_set<xrpl::Asset>> reverseBooks_;
     xrpl::hardened_hash_map<std::pair<xrpl::Asset, xrpl::Domain>, xrpl::hardened_hash_set<xrpl::Asset>>

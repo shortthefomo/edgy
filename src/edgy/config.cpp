@@ -3,9 +3,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -25,7 +30,7 @@ usage()
         << "  --listen-ws <host:port>     Local WebSocket\n"
         << "  --listen-rpc <host:port>    Local JSON-RPC HTTP\n"
         << "  --workers <n>               Concurrent path_find workers\n"
-        << "  --debug <file>              Append diagnostic log\n"
+        << "  --debug <file>              Diagnostic log (rotated on each start)\n"
         << "  --search <full|fast|mid|N>  Target / one-shot depth (default full)\n"
         << "  --search-fast <full|fast|N> First WebSocket reply depth (default full)\n"
         << "  --timeout-ms <n>            Abort one search after N ms (0 = none)\n"
@@ -437,6 +442,36 @@ Config::fromArgs(int argc, char** argv)
 
     clamp(cfg);
     return cfg;
+}
+
+std::string
+rotateDebugLog(std::string const& path)
+{
+    if (path.empty())
+        return {};
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) == 0)
+        return {};
+
+    auto const now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    std::ostringstream stamp;
+    stamp << std::put_time(&tm, "%Y%m%d-%H%M%S");
+    auto backup = path + "." + stamp.str();
+    for (int n = 2; fs::exists(backup, ec); ++n)
+        backup = path + "." + stamp.str() + "-" + std::to_string(n);
+
+    fs::rename(path, backup, ec);
+    if (ec)
+        return {};
+    return backup;
 }
 
 }  // namespace edgy

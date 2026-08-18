@@ -135,8 +135,40 @@ main()
     }
 
     {
+        expect(rotateDebugLog("").empty(), "empty debug path does not rotate");
+        auto const missing = std::string{"/tmp/edgy-test-rotate-missing.log"};
+        std::remove(missing.c_str());
+        expect(rotateDebugLog(missing).empty(), "missing debug log does not rotate");
+
+        auto const path = std::string{"/tmp/edgy-test-rotate.log"};
+        std::remove(path.c_str());
+        {
+            std::ofstream out(path);
+            out << "previous run\n";
+        }
+        auto const backup = rotateDebugLog(path);
+        expect(!backup.empty(), "non-empty debug log is renamed");
+        expect(backup.find(path + ".") == 0, "backup keeps the configured path as prefix");
+        expect(!std::ifstream(path).good(), "configured path is free after rotate");
+        std::ifstream in(backup);
+        std::string line;
+        std::getline(in, line);
+        expect(line == "previous run", "rotated log keeps the previous run");
+        expect(rotateDebugLog(path).empty(), "second rotate with no new file is a no-op");
+        std::remove(backup.c_str());
+
+        {
+            std::ofstream out(path);
+        }
+        expect(rotateDebugLog(path).empty(), "empty leftover log is not kept as a backup");
+        std::remove(path.c_str());
+    }
+
+    {
         // Regression: empty apply queue skipped midCloseTick, so path_find
         // updates only went out on ledger close (~4s) instead of 100ms.
+        expect(pathDeepenBudget(false) == 0, "mid-close ticks do not FastPathFinder");
+        expect(pathDeepenBudget(true) == 2, "closed ledger rediscovers at most two sockets");
         auto idle = planApplyCycle(false, true, true);
         expect(!idle.exit && !idle.hold && !idle.takeBatch && idle.tick,
                "ready + empty queue still ticks (100ms path_find updates)");
@@ -263,7 +295,9 @@ main()
         emptyBook.why = ClobWalkWhy::EmptyBook;
         expect(!clobWalkIsFault(emptyBook), "empty book with no dirs is not a fault");
         emptyBook.dirs = 2;
-        expect(clobWalkIsFault(emptyBook), "empty book with dirs present is a fault");
+        emptyBook.offers = 2;
+        emptyBook.skippedOther = 2;
+        expect(!clobWalkIsFault(emptyBook), "dry CLOB with leftover Indexes is not a fault");
         ClobWalkResult threw;
         threw.why = ClobWalkWhy::Threw;
         expect(clobWalkIsFault(threw), "thrown walk is a fault");
@@ -2090,7 +2124,7 @@ main()
         auto const unfunded = clobBookTake(*view, book, xrpl::STAmount{usd, 10});
         expect(unfunded.why == ClobWalkWhy::EmptyBook, "unfunded tip is empty_book");
         expect(unfunded.skippedUnfunded >= 1, "unfunded tip is counted");
-        expect(clobWalkIsFault(unfunded), "book present but unfunded is a walk fault");
+        expect(!clobWalkIsFault(unfunded), "unfunded tip is a dry CLOB not a throw");
     }
 
     {

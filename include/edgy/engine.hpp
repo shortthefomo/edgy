@@ -55,6 +55,15 @@ planApplyCycle(bool stop, bool ready, bool queueEmpty) noexcept
     };
 }
 
+// Mid-close ticks reprice only. Full FastPathFinder rediscover is
+// allowed on a closed-ledger wave, and only a couple of sockets at
+// once — 6 full searches every 100ms convoyed 100 sessions.
+[[nodiscard]] inline int
+pathDeepenBudget(bool allowDeepen) noexcept
+{
+    return allowDeepen ? 2 : 0;
+}
+
 // xrpld publishes ledgerClosed for N, then the validated txs for N.
 // Skip older ledgers (and the snapshot ledger). Hold a newer ledger's
 // txs until that ledger closes — applying them early dirties Indexes
@@ -281,7 +290,7 @@ private:
     publishBuilder(bool rebuildBooks);
 
     void
-    notifySubscriptions(bool revalidateOnly);
+    notifySubscriptions(bool revalidateOnly, bool allowDeepen = false);
 
     void
     midCloseTick();
