@@ -4,6 +4,7 @@
 
 #include <xrpl/ledger/PaymentSandbox.h>
 #include <xrpl/protocol/AccountID.h>
+#include <xrpl/protocol/Rules.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STPathSet.h>
 #include <xrpl/tx/paths/RippleCalc.h>
@@ -41,6 +42,11 @@ rippleCalculate(
     PathServices& services,
     xrpl::path::RippleCalc::Input const* input)
 {
+    // Payment::doApply installs this guard. AMM swap rounding and
+    // changeSpotPriceQuality read getCurrentTransactionRules(), not
+    // view.rules(). Without it, no-fee AMM spot beats the XRP/XAH CLOB
+    // and maxOffer swallows the whole send_max (~8710 instead of ~8760).
+    xrpl::CurrentTransactionRulesGuard const rules{view.rules()};
     return xrpl::path::RippleCalc::rippleCalculate(
         view, saMax, saDst, dst, src, paths, domain, services, input);
 }

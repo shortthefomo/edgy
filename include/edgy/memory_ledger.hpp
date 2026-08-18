@@ -130,6 +130,13 @@ public:
     [[nodiscard]] std::size_t
     overlaySize() const;
 
+    // Prefer overlay keys that already existed in the snapshot (modifies),
+    // rotated by seed so we do not check the same four low keys every close.
+    // Snapshot-only creates are skipped — they are often next-ledger objects
+    // and show up as missing_node against ledger N.
+    [[nodiscard]] std::vector<key_type>
+    sampleKeys(std::size_t n, std::uint32_t seed = 0) const;
+
     [[nodiscard]] std::shared_ptr<xrpl::SLE const>
     sleOf(xrpl::uint256 const& key) const;
 

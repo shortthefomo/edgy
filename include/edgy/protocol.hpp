@@ -22,6 +22,23 @@ sleFromBlob(xrpl::Blob const& blob, xrpl::uint256 const& key);
 [[nodiscard]] std::shared_ptr<xrpl::SLE>
 sleFromBinary(std::string const& dataHex, std::string const& indexHex);
 
+// True if path-find state on `local` matches `node`. Bookkeeping fields
+// (PreviousTxnID, directory node indexes) are ignored — apply rewrite
+// changes those even when balances and books are correct. Returns the
+// first differing field name, or nullptr when they match.
+[[nodiscard]] char const*
+sleFirstMismatch(xrpl::STObject const& local, xrpl::STObject const& node);
+
+[[nodiscard]] inline bool
+sleCoversNode(xrpl::STObject const& local, xrpl::STObject const& node)
+{
+    return sleFirstMismatch(local, node) == nullptr;
+}
+
+// "31!=32 +1-2" when Indexes sets differ; empty when they match.
+[[nodiscard]] std::string
+indexesDiffText(xrpl::STObject const& local, xrpl::STObject const& node);
+
 // Drop JSON keys that are not SFields so STParsedJSON can apply
 // AccountRoot / Offer / RippleState updates from a xahaud stream.
 // Does not walk into amount/issue objects (currency/issuer/value).

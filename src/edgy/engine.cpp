@@ -1,5 +1,6 @@
 #include <edgy/engine.hpp>
 
+#include <edgy/book_util.hpp>
 #include <edgy/compat.hpp>
 #include <edgy/protocol.hpp>
 #include <edgy/thread_pool.hpp>
@@ -7,17 +8,19 @@
 #ifndef EDGY_XAHAU
 #include <xrpld/rpc/detail/Pathfinder.h>
 #endif
-#include <xrpld/rpc/detail/Tuning.h>
 
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/StringUtilities.h>
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/json/json_value.h>
 #include <xrpl/json/to_string.h>
+#include <xrpl/basics/chrono.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/ErrorCodes.h>
 #include <xrpl/protocol/RPCErr.h>
+#include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/STParsedJSON.h>
 #include <xrpl/protocol/detail/STVar.h>
 #include <xrpl/protocol/SField.h>
@@ -25,12 +28,14 @@
 #include <xrpl/protocol/STObject.h>
 #include <xrpl/protocol/Serializer.h>
 #include <xrpl/protocol/TxMeta.h>
+#include <xrpl/protocol/digest.h>
 #include <xrpl/protocol/jss.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -77,8 +82,84 @@ enum class MetaApply : std::uint8_t
     Incomplete,
 };
 
+void
+indexesPush(xrpl::STVector256& idxs, xrpl::uint256 const& key)
+{
+#ifdef EDGY_XAHAU
+    idxs.push_back(key);
+#else
+    idxs.pushBack(key);
+#endif
+}
+
+void
+unlinkOfferFromBook(
+    LedgerBuilder& builder,
+    xrpl::uint256 const& offerKey,
+    xrpl::uint256 const& dirKey)
+{
+    auto dir = builder.clone(dirKey);
+    if (!dir || !dir->isFieldPresent(xrpl::sfIndexes))
+        return;
+    auto const& cur = dir->getFieldV256(xrpl::sfIndexes);
+    xrpl::STVector256 kept(xrpl::sfIndexes);
+    bool changed = false;
+    for (auto const& x : cur)
+    {
+        if (x == offerKey)
+        {
+            changed = true;
+            continue;
+        }
+        indexesPush(kept, x);
+    }
+    if (!changed)
+        return;
+    dir->setFieldV256(xrpl::sfIndexes, kept);
+    builder.upsert(std::move(dir));
+}
+
+void
+linkOffersIntoBookDirs(
+    LedgerBuilder& builder,
+    std::vector<xrpl::uint256> const& offerKeys)
+{
+    for (auto const& offerKey : offerKeys)
+    {
+        auto off = builder.clone(offerKey);
+        if (!off || off->getType() != xrpl::ltOFFER ||
+            !off->isFieldPresent(xrpl::sfBookDirectory))
+            continue;
+        auto const dirKey = off->getFieldH256(xrpl::sfBookDirectory);
+        auto dir = builder.clone(dirKey);
+        if (!dir)
+            continue;
+        xrpl::STVector256 idxs(xrpl::sfIndexes);
+        if (dir->isFieldPresent(xrpl::sfIndexes))
+            idxs = dir->getFieldV256(xrpl::sfIndexes);
+        bool found = false;
+        for (auto const& x : idxs)
+        {
+            if (x == offerKey)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (found)
+            continue;
+        indexesPush(idxs, offerKey);
+        dir->setFieldV256(xrpl::sfIndexes, idxs);
+        builder.upsert(std::move(dir));
+    }
+}
+
 MetaApply
-applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject const& node)
+applyMetaNode(
+    LedgerBuilder& builder,
+    LocalOrderBooks& books,
+    xrpl::STObject const& node,
+    std::vector<xrpl::uint256>* offerKeys)
 {
     try
     {
@@ -98,14 +179,29 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
         if (deleted)
         {
             if (auto cur = builder.clone(key))
+            {
+                if (cur->getType() == xrpl::ltOFFER &&
+                    cur->isFieldPresent(xrpl::sfBookDirectory))
+                {
+                    unlinkOfferFromBook(
+                        builder, key, cur->getFieldH256(xrpl::sfBookDirectory));
+                }
                 books.removeFromSle(cur);
+            }
             else if (node.isFieldPresent(xrpl::sfFinalFields))
             {
                 auto const& inner =
                     dynamic_cast<xrpl::STObject const&>(node.peekAtField(xrpl::sfFinalFields));
                 try
                 {
-                    books.removeFromSle(sleFromMetaNode(node, inner, key));
+                    auto const dead = sleFromMetaNode(node, inner, key);
+                    if (dead->getType() == xrpl::ltOFFER &&
+                        dead->isFieldPresent(xrpl::sfBookDirectory))
+                    {
+                        unlinkOfferFromBook(
+                            builder, key, dead->getFieldH256(xrpl::sfBookDirectory));
+                    }
+                    books.removeFromSle(dead);
                 }
                 catch (...)
                 {
@@ -144,6 +240,8 @@ applyMetaNode(LedgerBuilder& builder, LocalOrderBooks& books, xrpl::STObject con
                 builder.upsert(sle);
             return MetaApply::Incomplete;
         }
+        if (sle->getType() == xrpl::ltOFFER && offerKeys)
+            offerKeys->push_back(key);
         books.addFromSle(sle);
         builder.upsert(std::move(sle));
         return fname == xrpl::sfCreatedNode ? MetaApply::Created : MetaApply::Modified;
@@ -170,6 +268,7 @@ applyJsonAffectedNodes(
     if (!nodes->isArray())
         return stats;
 
+    std::vector<xrpl::uint256> offerKeys;
     auto note = [&](MetaApply kind) {
         switch (kind)
         {
@@ -290,9 +389,10 @@ applyJsonAffectedNodes(
             }
             // parseObject uses sfGeneric; applyMetaNode keys off the node name.
             parsed.object->setFName(*kind.field);
-            note(applyMetaNode(builder, books, *parsed.object));
+            note(applyMetaNode(builder, books, *parsed.object, &offerKeys));
         }
     }
+    linkOffersIntoBookDirs(builder, offerKeys);
     return stats;
 }
 
@@ -344,6 +444,34 @@ fillHeaderFromLedgerJson(xrpl::LedgerHeader& header, json::Value const& ledger)
         (void)header.txHash.parseHex(ledger[xrpl::jss::transaction_hash].asString());
     if (ledger.isMember("total_coins") && ledger["total_coins"].isString())
         header.drops = xrpl::XRPAmount{std::stoll(ledger["total_coins"].asString())};
+    auto asU32 = [](json::Value const& v) -> std::uint32_t {
+        if (v.isIntegral())
+            return v.asUInt();
+        if (v.isString())
+        {
+            try
+            {
+                return static_cast<std::uint32_t>(std::stoul(v.asString()));
+            }
+            catch (...)
+            {
+                return 0;
+            }
+        }
+        return 0;
+    };
+    // BookStep / OfferStream use parentCloseTime as "now". Leaving it
+    // default (epoch) makes every expiring offer look live or dead
+    // incorrectly and can hide CLOB depth Flow needs next to AMMs.
+    if (ledger.isMember(xrpl::jss::close_time))
+        header.closeTime = xrpl::NetClock::time_point{
+            std::chrono::seconds{asU32(ledger[xrpl::jss::close_time])}};
+    if (ledger.isMember(xrpl::jss::parent_close_time))
+        header.parentCloseTime = xrpl::NetClock::time_point{
+            std::chrono::seconds{asU32(ledger[xrpl::jss::parent_close_time])}};
+    if (ledger.isMember(xrpl::jss::close_time_resolution))
+        header.closeTimeResolution =
+            xrpl::NetClock::duration{asU32(ledger[xrpl::jss::close_time_resolution])};
     header.validated = true;
     header.accepted = true;
 }
@@ -376,6 +504,7 @@ shortHash(xrpl::uint256 const& hash)
     auto const s = to_string(hash);
     return s.size() > 12 ? s.substr(0, 12) : s;
 }
+
 
 }  // namespace
 
@@ -460,6 +589,14 @@ Engine::statusJson() const
         j["validated_ledger"] = std::move(vl);
         j["objects"] = static_cast<std::uint32_t>(published_->size());
         j["overlay"] = static_cast<std::uint32_t>(published_->overlaySize());
+        j["digest_checked"] = digestChecked_.load(std::memory_order_relaxed);
+        j["digest_matched"] = digestMatched_.load(std::memory_order_relaxed);
+        j["digest_mismatch"] = digestMismatch_.load(std::memory_order_relaxed);
+        j["digest_missing_local"] = digestMissingLocal_.load(std::memory_order_relaxed);
+        j["digest_missing_node"] = digestMissingNode_.load(std::memory_order_relaxed);
+        j["digest_reencoded"] = digestReencoded_.load(std::memory_order_relaxed);
+        j["digest_last_seq"] = digestLastSeq_.load(std::memory_order_relaxed);
+        j["digest_drift"] = digestDrift_.load(std::memory_order_relaxed);
     }
     else
     {
@@ -595,6 +732,13 @@ Engine::pathCountsJson() const
             j[xrpl::jss::complete_ledgers] = std::to_string(first) + "-" + std::to_string(seq);
             setU64(j, "objects", published_->size());
             setU64(j, "overlay", published_->overlaySize());
+            setU64(j, "digest_checked", digestChecked_.load(std::memory_order_relaxed));
+            setU64(j, "digest_matched", digestMatched_.load(std::memory_order_relaxed));
+            setU64(j, "digest_mismatch", digestMismatch_.load(std::memory_order_relaxed));
+            setU64(j, "digest_missing_local", digestMissingLocal_.load(std::memory_order_relaxed));
+            setU64(j, "digest_missing_node", digestMissingNode_.load(std::memory_order_relaxed));
+            setU64(j, "digest_reencoded", digestReencoded_.load(std::memory_order_relaxed));
+            j["digest_drift"] = digestDrift_.load(std::memory_order_relaxed);
         }
         else
         {
@@ -859,6 +1003,7 @@ Engine::loadSnapshot()
     services_.books().clear();
     prevCloseTxs_ = 0;
     resetApplyStats();
+    pendingFutureTxs_.clear();
     {
         std::lock_guard lock(stateMutex_);
         cache_.reset();
@@ -879,6 +1024,7 @@ Engine::loadSnapshot()
     if (firstSeq_.load() == 0)
         firstSeq_.store(header.seq);
     currentSeq_.store(header.seq);
+    snapshotSeq_.store(header.seq);
     std::cerr << "snapshot ledger " << header.seq << " " << to_string(header.hash)
               << " network=" << cfg_.networkName() << " native=" << cfg_.nativeCurrency()
               << '\n';
@@ -978,6 +1124,7 @@ Engine::loadSnapshot()
     }
 
     publishBuilder(false);
+    scheduleDigestCheck();
 }
 
 void
@@ -1013,6 +1160,7 @@ void
 Engine::resetApplyStats()
 {
     applyTxs_ = 0;
+    applyLedgerTxs_ = 0;
     applyNoMeta_ = 0;
     applyParseFail_ = 0;
     applySkipped_ = 0;
@@ -1116,6 +1264,15 @@ Engine::applyLedgerClosed(json::Value const& msg)
     logSync("closed", header, msg);
     prevCloseTxs_ = msgTxnCount(msg);
     resetApplyStats();
+    if (shouldDigestOnClose(prevCloseTxs_))
+        scheduleDigestCheck();
+    if (!pendingFutureTxs_.empty())
+    {
+        auto held = std::move(pendingFutureTxs_);
+        pendingFutureTxs_.clear();
+        for (auto const& heldMsg : held)
+            applyTransaction(heldMsg);
+    }
     if (auto cache = cache_)
         cache->expandIncompleteLines();
     json::Value closed;
@@ -1144,8 +1301,19 @@ Engine::applyTransaction(json::Value const& msg)
 {
     if (!ready_.load())
         return;
-    if (!shouldApplyStreamTx(msgLedgerIndex(msg), currentSeq_.load()))
-        return;
+    {
+        auto const txSeq = msgLedgerIndex(msg);
+        auto const cur = currentSeq_.load();
+        auto const snap = snapshotSeq_.load();
+        if (shouldDeferStreamTx(txSeq, cur, snap))
+        {
+            if (pendingFutureTxs_.size() < 4096)
+                pendingFutureTxs_.push_back(msg);
+            return;
+        }
+        if (!shouldApplyStreamTx(txSeq, cur, snap))
+            return;
+    }
     if (msg.isMember(xrpl::jss::validated) && msg[xrpl::jss::validated].isBool() &&
         !msg[xrpl::jss::validated].asBool())
         return;
@@ -1215,17 +1383,242 @@ Engine::applyTransaction(json::Value const& msg)
                 return;
             }
             xrpl::TxMeta meta(xrpl::uint256{}, 0, *blob);
+            std::vector<xrpl::uint256> offerKeys;
             for (auto const& node : meta.getNodes())
-                note(applyMetaNode(builder_, services_.books(), node), any);
+                note(applyMetaNode(builder_, services_.books(), node, &offerKeys), any);
+            linkOffersIntoBookDirs(builder_, offerKeys);
         }
         ++applyTxs_;
+        {
+            auto const txSeq = msgLedgerIndex(msg);
+            if (txSeq == 0 || txSeq == currentSeq_.load())
+                ++applyLedgerTxs_;
+        }
         if (any)
             dirty_.store(true, std::memory_order_release);
+        maybeDigestAfterApply();
     }
     catch (std::exception const& ex)
     {
         ++applyNoMeta_;
         std::cerr << "applyTransaction: " << ex.what() << '\n';
+        maybeDigestAfterApply();
+    }
+}
+
+void
+Engine::maybeDigestAfterApply()
+{
+    if (!shouldDigestAfterApply(
+            applyLedgerTxs_,
+            applyNoMeta_,
+            prevCloseTxs_,
+            currentSeq_.load(),
+            digestDoneSeq_.load()))
+        return;
+    digestDoneSeq_.store(currentSeq_.load(), std::memory_order_relaxed);
+    if (dirty_.exchange(false, std::memory_order_acq_rel))
+        publishBuilder(false);
+    scheduleDigestCheck();
+}
+
+void
+Engine::scheduleDigestCheck()
+{
+    if (!ready_.load() || stop_.load() || !node_ || !node_->connected() || !pool_)
+        return;
+    if (digestCheckBusy_.exchange(true, std::memory_order_acq_rel))
+        return;
+    std::shared_ptr<MemoryLedger const> view;
+    {
+        std::lock_guard lock(stateMutex_);
+        view = published_;
+    }
+    if (!view)
+    {
+        digestCheckBusy_.store(false, std::memory_order_release);
+        return;
+    }
+    try
+    {
+        pool_->submit([this, view] {
+            try
+            {
+                runDigestCheck(view);
+            }
+            catch (std::exception const& ex)
+            {
+                std::cerr << "digest check: " << ex.what() << '\n';
+            }
+            digestCheckBusy_.store(false, std::memory_order_release);
+        });
+    }
+    catch (...)
+    {
+        digestCheckBusy_.store(false, std::memory_order_release);
+    }
+}
+
+void
+Engine::runDigestCheck(std::shared_ptr<MemoryLedger const> const& view)
+{
+    if (!view || stop_.load() || !node_ || !node_->connected())
+        return;
+    auto const seq = view->seq();
+    auto const keys = view->sampleKeys(8, seq);
+    std::uint32_t matched = 0;
+    std::uint32_t mismatch = 0;
+    std::uint32_t missingLocal = 0;
+    std::uint32_t missingNode = 0;
+    std::uint32_t reencoded = 0;
+    std::uint32_t ownerDir = 0;
+    xrpl::uint256 firstBad;
+    char const* firstField = nullptr;
+    std::string firstIdx;
+    bool haveBad = false;
+    auto isBookDir = [](xrpl::SLE const* a, xrpl::SLE const* b) {
+        auto hasRate = [](xrpl::SLE const* s) {
+            return s && s->getType() == xrpl::ltDIR_NODE &&
+                s->isFieldPresent(xrpl::sfExchangeRate);
+        };
+        return hasRate(a) || hasRate(b);
+    };
+    for (auto const& key : keys)
+    {
+        if (stop_.load())
+            return;
+        json::Value req{kJsonObject};
+        req[xrpl::jss::index] = to_string(key);
+        req[xrpl::jss::binary] = true;
+        req[xrpl::jss::ledger_index] = seq;
+        std::optional<xrpl::uint256> nodeDigest;
+        std::shared_ptr<xrpl::SLE> nodeSle;
+        try
+        {
+            auto res = node_->request("ledger_entry", req, std::chrono::seconds{4});
+            if (!res.isMember(xrpl::jss::error))
+            {
+                std::string hex;
+                if (res.isMember(xrpl::jss::node) && res[xrpl::jss::node].isString())
+                    hex = res[xrpl::jss::node].asString();
+                else if (res.isMember("node_binary") && res["node_binary"].isString())
+                    hex = res["node_binary"].asString();
+                if (auto const blob = xrpl::strUnHex(hex))
+                {
+                    nodeDigest = xrpl::sha512Half(xrpl::makeSlice(*blob));
+                    nodeSle = sleFromBlob(*blob, key);
+                }
+            }
+        }
+        catch (...)
+        {
+            continue;
+        }
+        auto const localSle = view->read(xrpl::keylet::unchecked(key));
+        auto const cmp = compareAppliedObject(
+            view->digest(key),
+            nodeDigest,
+            localSle.get(),
+            nodeSle.get());
+        switch (cmp)
+        {
+            case ObjectDigestCmp::Match:
+                ++matched;
+                break;
+            case ObjectDigestCmp::Reencoded:
+                ++reencoded;
+                ++matched;
+                break;
+            case ObjectDigestCmp::Mismatch:
+            {
+                auto const* field =
+                    (localSle && nodeSle) ? sleFirstMismatch(*localSle, *nodeSle) : nullptr;
+                bool const ownerIndexes = field && std::strcmp(field, "Indexes") == 0 &&
+                    !isBookDir(localSle.get(), nodeSle.get());
+                if (ownerIndexes)
+                    ++ownerDir;
+                else
+                    ++mismatch;
+                if (!haveBad)
+                {
+                    firstBad = key;
+                    haveBad = true;
+                    firstField = field;
+                    if (field && std::strcmp(field, "Indexes") == 0 && localSle && nodeSle)
+                        firstIdx = indexesDiffText(*localSle, *nodeSle);
+                }
+                break;
+            }
+            case ObjectDigestCmp::MissingLocal:
+                ++missingLocal;
+                if (!haveBad)
+                {
+                    firstBad = key;
+                    haveBad = true;
+                }
+                break;
+            case ObjectDigestCmp::MissingNode:
+                ++missingNode;
+                if (!haveBad)
+                {
+                    firstBad = key;
+                    haveBad = true;
+                }
+                break;
+        }
+    }
+    auto const checked = static_cast<std::uint32_t>(keys.size());
+    auto const drift = mismatch + missingLocal + missingNode;
+    digestChecked_.store(checked, std::memory_order_relaxed);
+    digestMatched_.store(matched, std::memory_order_relaxed);
+    digestMismatch_.store(mismatch, std::memory_order_relaxed);
+    digestMissingLocal_.store(missingLocal, std::memory_order_relaxed);
+    digestMissingNode_.store(missingNode, std::memory_order_relaxed);
+    digestReencoded_.store(reencoded, std::memory_order_relaxed);
+    digestLastSeq_.store(seq, std::memory_order_relaxed);
+    bool const drifted = drift >= static_cast<std::uint32_t>(kDigestDriftResync);
+    digestDrift_.store(drifted, std::memory_order_relaxed);
+    if (drifted)
+    {
+        std::cerr << "sync WARNING digest drift ledger " << seq << " checked=" << checked
+                  << " match=" << matched << " mismatch=" << mismatch
+                  << " missing_local=" << missingLocal << " missing_node=" << missingNode
+                  << " reencoded=" << reencoded;
+        if (ownerDir != 0)
+            std::cerr << " owner_dir=" << ownerDir;
+        if (haveBad)
+            std::cerr << " first=" << shortHash(firstBad);
+        if (firstField)
+            std::cerr << " field=" << firstField;
+        if (!firstIdx.empty())
+            std::cerr << " " << firstIdx;
+        std::cerr << '\n';
+    }
+    else
+    {
+        std::cerr << "sync digest ledger " << seq << " checked=" << checked
+                  << " match=" << matched << " reencoded=" << reencoded;
+        if (ownerDir != 0)
+            std::cerr << " owner_dir=" << ownerDir;
+        if (drift == 1)
+        {
+            std::cerr << " miss=1";
+            if (haveBad)
+                std::cerr << " first=" << shortHash(firstBad);
+            if (firstField)
+                std::cerr << " field=" << firstField;
+            if (!firstIdx.empty())
+                std::cerr << " " << firstIdx;
+            if (missingNode != 0)
+                std::cerr << " missing_node";
+            if (missingLocal != 0)
+                std::cerr << " missing_local";
+        }
+        else if (reencoded != 0 && ownerDir == 0)
+        {
+            std::cerr << " (same fields, apply rewrite)";
+        }
+        std::cerr << '\n';
     }
 }
 

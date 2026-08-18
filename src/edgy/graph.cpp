@@ -55,6 +55,39 @@ bookPath(std::vector<xrpl::Asset> const& hops)
     return path;
 }
 
+// Prepend the source IOU issuer (Pathfinder source_: rMx / RLUSD / rMx).
+// Distinct from issuerBridgePath, which inserts the *mid* issuer after a book.
+xrpl::STPath
+prefixSourceIssuer(xrpl::STPath path, xrpl::Asset const& srcAsset)
+{
+    if (path.size() + 1 > SearchBudget::kMaxPathLength || !canIssuerHop(srcAsset))
+        return path;
+    xrpl::STPath out;
+    out.reserve(path.size() + 1);
+    pathPush(out, sourceIssuerPathElement(srcAsset));
+    for (auto const& el : path)
+        pathPush(out, el);
+    return out;
+}
+
+xrpl::STPath
+issuerBridgePath(std::vector<xrpl::Asset> const& hops)
+{
+    xrpl::STPath path;
+    path.reserve(hops.size() * 2);
+    for (std::size_t i = 0; i < hops.size(); ++i)
+    {
+        pathPush(path, bookElement(hops[i]));
+        if (i + 1 >= hops.size() || !canIssuerHop(hops[i]))
+            continue;
+        auto remaining = hops.size() - i - 1;
+        if (path.size() + 1 + remaining > SearchBudget::kMaxPathLength)
+            continue;
+        pathPush(path, accountPathElement(hops[i]));
+    }
+    return path;
+}
+
 xrpl::STAmount
 srcMaxAmount(
     xrpl::Asset const& srcAsset,
@@ -87,21 +120,6 @@ addPath(xrpl::STPathSet& set, xrpl::STPath path)
     if (set.size() >= 256)
         return;
     pathSetPush(set, std::move(path));
-}
-
-// Currency sequence only — same hops / different issuers look identical
-// in the UI and should not consume six path slots.
-std::string
-hopCurrencyKey(xrpl::STPath const& path)
-{
-    std::string key;
-    key.reserve(path.size() * 16);
-    for (auto const& el : path)
-    {
-        key += pathElementKey(el);
-        key.push_back('/');
-    }
-    return key;
 }
 
 bool
@@ -397,7 +415,11 @@ hopsFromPath(xrpl::STPath const& path)
     std::vector<xrpl::Asset> hops;
     hops.reserve(path.size());
     for (auto const& el : path)
+    {
+        if (pathElementIsAccount(el))
+            continue;
         hops.push_back(pathElementAsset(el));
+    }
     return hops;
 }
 
@@ -531,6 +553,7 @@ FastPathFinder::search(
     int const maxHops = std::clamp(budget.maxHops, 1, SearchBudget::kMaxPathLength);
     auto const srcIsXrp = xrpl::isXRP(srcAsset);
     auto const dstIsXrp = xrpl::isXRP(dstAsset);
+    bool const issuerIsSender = srcIsXrp || srcAsset.getIssuer() == src;
 
     std::optional<xrpl::Quality> bound;
     if (!convertAll && sendMax && !isConvertAllAmount(*sendMax) && sendMax->signum() > 0 &&
@@ -543,6 +566,12 @@ FastPathFinder::search(
     double const minUseful = convertAll
         ? 0.0
         : destNeeded / static_cast<double>(std::max(1, xrpl::rpc::tuning::kPathFindMaxPaths + 2));
+    // Convert-all with a real send_max: rank by dest you get from that
+    // input, not raw tip size (a fat EVR book looked "wider" than USD).
+    double const sendIn = (convertAll && sendMax && sendMax->signum() > 0 &&
+                           !isConvertAllAmount(*sendMax))
+        ? amountAsDouble(*sendMax)
+        : 0.0;
 
     // 1–2 hop books must stay ahead of 3–8 hop meets. A global quality
     // sort let optimistic 4-hop dust tips bury RLUSD→USD→XRP and then
@@ -559,6 +588,15 @@ FastPathFinder::search(
         if (auto s = scoreHops(
                 books, ledger, srcAsset, dstAsset, std::move(hops), domain, destNeeded, bound))
         {
+            if (sendIn > 0)
+            {
+                auto const r = qualityRatio(s->quality);
+                double est = r > 0 ? sendIn / r : 0;
+                if (s->destWidth > 0 && est > s->destWidth)
+                    est = s->destWidth;
+                if (est > 0)
+                    s->destWidth = est;
+            }
             if (n <= 2)
                 shortHops.push_back(std::move(*s));
             else
@@ -819,6 +857,10 @@ FastPathFinder::search(
         consider(hopsFromPath(path));
     }
 
+    // Incremental convert-all must see every unique 2-hop, including a
+    // thin USD.GateHub AMM that destWidth-sort would drop for MAG/PROFIT.
+    std::vector<PathScore> allShortHops = shortHops;
+
     auto takeBest = [&](std::vector<PathScore>& v) {
         std::ranges::sort(v, [&](PathScore const& a, PathScore const& b) {
             return betterScore(a, b, convertAll, minUseful);
@@ -834,9 +876,37 @@ FastPathFinder::search(
     scored.insert(scored.end(), shortHops.begin(), shortHops.end());
     scored.insert(scored.end(), longHops.begin(), longHops.end());
 
-    xrpl::STPathSet candidates;
-    for (auto const& s : scored)
-        addPath(candidates, bookPath(s.hops));
+    struct Cand
+    {
+        xrpl::STPath path;
+        int scoreIdx{0};
+        int bookHops{0};
+    };
+    std::vector<Cand> candidates;
+    candidates.reserve(scored.size() * 2);
+    auto emitPath = [&](xrpl::STPath path, int scoreIdx, int bookHops) {
+        if (path.empty() || path.size() > SearchBudget::kMaxPathLength)
+            return;
+        if (candidates.size() >= 256)
+            return;
+        candidates.push_back(Cand{std::move(path), scoreIdx, bookHops});
+    };
+    for (int i = 0; i < static_cast<int>(scored.size()); ++i)
+    {
+        auto const hopsN = static_cast<int>(scored[static_cast<std::size_t>(i)].hops.size());
+        auto booksOnly = bookPath(scored[static_cast<std::size_t>(i)].hops);
+        auto bridged = issuerBridgePath(scored[static_cast<std::size_t>(i)].hops);
+        bool const hasBridge = bridged.size() != booksOnly.size();
+        if (!issuerIsSender)
+        {
+            auto prefixed = prefixSourceIssuer(booksOnly, srcAsset);
+            if (prefixed.size() != booksOnly.size())
+                emitPath(std::move(prefixed), i, hopsN);
+        }
+        emitPath(std::move(booksOnly), i, hopsN);
+        if (hasBridge)
+            emitPath(std::move(bridged), i, hopsN);
+    }
 
     result.candidates = static_cast<int>(candidates.size());
     result.search = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -866,18 +936,22 @@ FastPathFinder::search(
 
     int const limit = std::min(static_cast<int>(candidates.size()), budget.rank);
     std::unordered_set<std::string> rankedKeys;
+    std::unordered_set<std::string> rankedHubs;
     rankedKeys.reserve(static_cast<std::size_t>(limit));
+    rankedHubs.reserve(static_cast<std::size_t>(limit));
 
     auto pushCheap = [&](int i, xrpl::STPath const& path) {
+        auto const scoreIdx = candidates[static_cast<std::size_t>(i)].scoreIdx;
         ranks.push_back(Rank{
-            .quality = (static_cast<std::size_t>(i) < scored.size()) ? scored[static_cast<std::size_t>(i)].quality
-                                                                     : worstQuality(),
-            .liquidity = (static_cast<std::size_t>(i) < scored.size() &&
-                          scored[static_cast<std::size_t>(i)].destWidth > 0)
+            .quality = (static_cast<std::size_t>(scoreIdx) < scored.size())
+                ? scored[static_cast<std::size_t>(scoreIdx)].quality
+                : worstQuality(),
+            .liquidity = (static_cast<std::size_t>(scoreIdx) < scored.size() &&
+                          scored[static_cast<std::size_t>(scoreIdx)].destWidth > 0)
                 ? xrpl::STAmount(
                       dstAsset,
                       static_cast<std::uint64_t>(
-                          std::min(scored[static_cast<std::size_t>(i)].destWidth, 1e15)),
+                          std::min(scored[static_cast<std::size_t>(scoreIdx)].destWidth, 1e15)),
                       0,
                       false)
                 : xrpl::STAmount{dstAsset},
@@ -896,17 +970,27 @@ FastPathFinder::search(
     {
         if (continueCallback && !continueCallback())
             break;
-        auto const& path = candidates[static_cast<std::size_t>(i)];
+        auto const& cand = candidates[static_cast<std::size_t>(i)];
+        auto const& path = cand.path;
         if (path.size() > SearchBudget::kMaxPathLength)
             continue;
-        bool const longHop = path.size() > 2;
-        // Have six working 2-hops and already priced `rank` of them:
+        bool const longHop = cand.bookHops > 2;
+        // Convert-all with send_max must isolate more unique hubs so
+        // incremental Flow can prefer USD.GateHub over a fat PROFIT tip.
+        int const isolateNeed =
+            (convertAll && sendIn > 0) ? 16 : need;
+        int const isolateAttempts =
+            (convertAll && sendIn > 0) ? std::max(budget.rank, 24) : budget.rank;
+        // Have enough working 2-hops and already priced `rank` of them:
         // do not spend calcs on longer speculative hops.
-        if (successes >= need && (longHop || attempts >= budget.rank))
+        if (successes >= isolateNeed && (longHop || attempts >= isolateAttempts))
             break;
         if (attempts >= attemptCap)
             break;
         auto const sig = hopCurrencyKey(path);
+        auto const hub = hopBookKey(path);
+        if (rankedHubs.contains(hub))
+            continue;
         if (!rankedKeys.insert(sig).second)
             continue;
         ++attempts;
@@ -925,6 +1009,7 @@ FastPathFinder::search(
             if (!xrpl::isTesSuccess(rc.result()))
                 continue;
 
+            rankedHubs.insert(hub);
             ++successes;
             ranks.push_back(Rank{
                 .quality = xrpl::Quality{xrpl::getRate(rc.actualAmountOut, rc.actualAmountIn)},
@@ -946,10 +1031,10 @@ FastPathFinder::search(
              static_cast<int>(ranks.size()) < limit;
              ++i)
         {
-            auto const& path = candidates[static_cast<std::size_t>(i)];
+            auto const& path = candidates[static_cast<std::size_t>(i)].path;
             if (path.size() > SearchBudget::kMaxPathLength)
                 continue;
-            if (!rankedKeys.insert(hopCurrencyKey(path)).second)
+            if (!rankedKeys.insert(hopBookKey(path)).second)
                 continue;
             pushCheap(i, path);
         }
@@ -975,14 +1060,15 @@ FastPathFinder::search(
         {
             if (static_cast<int>(result.paths.size()) >= take)
                 return;
-            auto const& path = candidates[static_cast<std::size_t>(r.index)];
+            auto const& cand = candidates[static_cast<std::size_t>(r.index)];
+            auto const& path = cand.path;
             if (path.size() > SearchBudget::kMaxPathLength)
                 continue;
-            if (shortOnly && path.size() > 2)
+            if (shortOnly && cand.bookHops > 2)
                 continue;
-            if (!shortOnly && path.size() <= 2)
+            if (!shortOnly && cand.bookHops <= 2)
                 continue;
-            if (!chosen.insert(hopCurrencyKey(path)).second)
+            if (!chosen.insert(hopBookKey(path)).second)
                 continue;
             if (static_cast<int>(result.paths.size()) < SearchBudget::kMaxPathCount)
                 pathSetPushAlways(result.paths, path);
@@ -993,6 +1079,194 @@ FastPathFinder::search(
     // the same 2-hop set xrpld Pathfinder returns.
     pick(true);
     pick(false);
+
+    // Convert-all send_max is quoted by Pathfinder + one RippleCalc in
+    // the session (xrpld PathRequest). Incremental Flow here replaced
+    // the six with dest+XRP and burned hundreds of extra calcs.
+    if (false && convertAll && sendIn > 0 && ledger)
+    {
+        auto flowOut = [&](xrpl::STPathSet const& ps) -> double {
+            if (ps.empty())
+                return 0;
+            if (continueCallback && !continueCallback())
+                return 0;
+            try
+            {
+                xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
+                xrpl::path::RippleCalc::Input in;
+                in.defaultPathsAllowed = false;
+                in.partialPaymentAllowed = true;
+                auto rc = rippleCalculate(
+                    sandbox,
+                    saMax,
+                    xrpl::largestAmount(dstAmount),
+                    dst,
+                    src,
+                    ps,
+                    domain,
+                    services,
+                    &in);
+                if (!xrpl::isTesSuccess(rc.result()))
+                    return 0;
+                return amountAsDouble(rc.actualAmountOut);
+            }
+            catch (...)
+            {
+                return 0;
+            }
+        };
+        struct HubCand
+        {
+            xrpl::STPath prefix;
+            xrpl::STPath book;
+        };
+        std::unordered_map<std::string, HubCand> byHub;
+        auto addHub = [&](xrpl::STPath p) {
+            if (p.empty() || p.size() > SearchBudget::kMaxPathLength)
+                return;
+            auto& slot = byHub[hopBookKey(p)];
+            if (!p.empty() && pathElementIsAccount(p.front()))
+                slot.prefix = std::move(p);
+            else if (slot.book.empty())
+                slot.book = std::move(p);
+        };
+        for (auto const& s : allShortHops)
+        {
+            auto p = bookPath(s.hops);
+            if (!issuerIsSender)
+                addHub(prefixSourceIssuer(p, srcAsset));
+            addHub(std::move(p));
+        }
+        for (auto const& r : ranks)
+        {
+            if (!r.fromCalc)
+                continue;
+            addHub(candidates[static_cast<std::size_t>(r.index)].path);
+        }
+
+        xrpl::STPath destHop = bookPath({dstAsset});
+        xrpl::STPath xrpHop = bookPath({xrp, dstAsset});
+        auto isRequired = [&](std::string const& key) {
+            return key == hopBookKey(destHop) || key == hopBookKey(xrpHop);
+        };
+        // Start from the isolate six. Replacing that set with dest+XRP
+        // alone (when no hub increments) is what dropped cards to 2 hops.
+        xrpl::STPathSet grown = result.paths;
+        if (grown.empty())
+        {
+            if (srcAsset != dstAsset && !xrpl::equalTokens(srcAsset, dstAsset))
+                pathSetPushAlways(grown, destHop);
+            if (!srcIsXrp && !dstIsXrp && srcAsset != dstAsset)
+                pathSetPushAlways(grown, xrpHop);
+        }
+        double const isolateOut = flowOut(grown);
+        double bestOut = isolateOut;
+        auto grownHas = [&](std::string const& key) {
+            for (auto const& p : grown)
+            {
+                if (hopBookKey(p) == key)
+                    return true;
+            }
+            return false;
+        };
+        auto trialWith = [&](xrpl::STPath const& p) {
+            xrpl::STPathSet trial;
+            if (static_cast<int>(grown.size()) < SearchBudget::kMaxPathCount)
+            {
+                trial = grown;
+                pathSetPushAlways(trial, p);
+                return trial;
+            }
+            int drop = -1;
+            for (int i = static_cast<int>(grown.size()) - 1; i >= 0; --i)
+            {
+                if (!isRequired(hopBookKey(grown[static_cast<std::size_t>(i)])))
+                {
+                    drop = i;
+                    break;
+                }
+            }
+            if (drop < 0)
+                return trial;
+            for (int i = 0; i < static_cast<int>(grown.size()); ++i)
+            {
+                if (i != drop)
+                    pathSetPushAlways(trial, grown[static_cast<std::size_t>(i)]);
+            }
+            pathSetPushAlways(trial, p);
+            return trial;
+        };
+
+        struct Tried
+        {
+            std::string key;
+            xrpl::STPath path;
+        };
+        std::vector<Tried> live;
+        live.reserve(byHub.size());
+        for (auto& [key, slot] : byHub)
+        {
+            if (continueCallback && !continueCallback())
+                break;
+            if (grownHas(key))
+                continue;
+            xrpl::STPath bestP;
+            double bestPOut = bestOut;
+            auto tryP = [&](xrpl::STPath const& p) {
+                if (p.empty())
+                    return;
+                auto const trial = trialWith(p);
+                if (trial.empty())
+                    return;
+                double const out = flowOut(trial);
+                if (out > bestPOut)
+                {
+                    bestPOut = out;
+                    bestP = p;
+                }
+            };
+            tryP(slot.book);
+            if (bestP.empty())
+                tryP(slot.prefix);
+            if (!bestP.empty())
+                live.push_back(Tried{key, std::move(bestP)});
+        }
+
+        while (!live.empty())
+        {
+            if (continueCallback && !continueCallback())
+                break;
+            int add = -1;
+            double addOut = bestOut;
+            xrpl::STPathSet addTrial;
+            for (int i = 0; i < static_cast<int>(live.size()); ++i)
+            {
+                if (grownHas(live[static_cast<std::size_t>(i)].key))
+                    continue;
+                auto trial = trialWith(live[static_cast<std::size_t>(i)].path);
+                if (trial.empty())
+                    continue;
+                double const out = flowOut(trial);
+                if (out > addOut)
+                {
+                    addOut = out;
+                    add = i;
+                    addTrial = std::move(trial);
+                }
+            }
+            if (add < 0)
+                break;
+            grown = std::move(addTrial);
+            bestOut = addOut;
+        }
+        // Never shrink the isolate six. Only keep incremental if it
+        // pays more dest and still has at least as many hops.
+        if (bestOut > isolateOut &&
+            static_cast<int>(grown.size()) >= static_cast<int>(result.paths.size()) &&
+            static_cast<int>(grown.size()) >= 2)
+            result.paths = std::move(grown);
+    }
+
     // Flow must see dest and the XRP bridge even when isolate ranking
     // filled six 2-hops. Evict a non-required tail slot — do not evict
     // dest to make room for the bridge (or the other way around).
@@ -1004,7 +1278,7 @@ FastPathFinder::search(
     auto hasKey = [](xrpl::STPathSet const& set, std::string const& key) {
         for (auto const& p : set)
         {
-            if (hopCurrencyKey(p) == key)
+            if (hopBookKey(p) == key)
                 return true;
         }
         return false;
@@ -1012,7 +1286,7 @@ FastPathFinder::search(
     auto requiredKey = [&](std::string const& key) {
         for (auto const& p : required)
         {
-            if (hopCurrencyKey(p) == key)
+            if (hopBookKey(p) == key)
                 return true;
         }
         return false;
@@ -1021,7 +1295,7 @@ FastPathFinder::search(
     {
         if (path.empty())
             continue;
-        auto const key = hopCurrencyKey(path);
+        auto const key = hopBookKey(path);
         if (hasKey(result.paths, key))
             continue;
         if (static_cast<int>(result.paths.size()) >= SearchBudget::kMaxPathCount)
@@ -1029,7 +1303,7 @@ FastPathFinder::search(
             int drop = -1;
             for (int i = static_cast<int>(result.paths.size()) - 1; i >= 0; --i)
             {
-                if (!requiredKey(hopCurrencyKey(result.paths[static_cast<std::size_t>(i)])))
+                if (!requiredKey(hopBookKey(result.paths[static_cast<std::size_t>(i)])))
                 {
                     drop = i;
                     break;
@@ -1052,7 +1326,7 @@ FastPathFinder::search(
     {
         if (static_cast<int>(result.discovered.size()) >= budget.rank)
             break;
-        auto const& path = candidates[static_cast<std::size_t>(r.index)];
+        auto const& path = candidates[static_cast<std::size_t>(r.index)].path;
         if (path.size() > SearchBudget::kMaxPathLength)
             continue;
         if (!chosen.insert(hopCurrencyKey(path)).second)

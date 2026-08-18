@@ -85,8 +85,12 @@ struct FastPathResult
  * size. The direct dest hop and the XRP bridge (IOU→IOU) are always
  * scored and kept in the Flow set even when isolate ranking already
  * filled six 2-hops, and even when hasBook misses a live CLOB/AMM.
- * RippleCalc filters the shortlist; session then keeps the better of
- * found / each hop / dest / XRP-bridge / default-path actualAmountOut.
+ * Each scored hop list is emitted as books-only, book→issuer
+ * account→book, and (when the sender is not the IOU issuer) a
+ * source-issuer prefix (xrpld Pathfinder: acct:rMx → USD → dest).
+ * Convert-all with send_max then grows the six by incremental dest-out
+ * over every unique 2-hop hub so a thin USD.GateHub AMM is not dropped
+ * for a fat MAG/PROFIT tip. Session quotes that six together.
  */
 class FastPathFinder
 {

@@ -108,6 +108,41 @@ bookPathElement(xrpl::Asset const& out)
 #endif
 }
 
+// Pathfinder book → issuer-account → book. After an IOU book hop, ripple
+// through that issuer so the next book/AMM can consume the IOU (Gift→BITx
+// AMM, then rBitcoi, then BITx/XRP).
+[[nodiscard]] inline xrpl::STPathElement
+accountPathElement(xrpl::Asset const& out)
+{
+#ifdef EDGY_XAHAU
+    auto const issue = out.holds<xrpl::Issue>() ? out.get<xrpl::Issue>() : xrpl::xrpIssue();
+    return xrpl::STPathElement(
+        kPathTypeAccount, issue.account, issue.currency, issue.account);
+#else
+    return xrpl::STPathElement(
+        xrpl::STPathElement::TypeAccount, out.getIssuer(), out, out.getIssuer());
+#endif
+}
+
+[[nodiscard]] inline bool
+pathElementIsAccount(xrpl::STPathElement const& el)
+{
+    return el.isAccount();
+}
+
+[[nodiscard]] inline bool
+canIssuerHop(xrpl::Asset const& asset)
+{
+    if (xrpl::isXRP(asset))
+        return false;
+#ifdef EDGY_XAHAU
+    return asset.holds<xrpl::Issue>() &&
+        asset.get<xrpl::Issue>().account != xrpl::xrpAccount();
+#else
+    return asset.holds<xrpl::Issue>() && !xrpl::isXRP(asset.getIssuer());
+#endif
+}
+
 inline void
 pathPush(xrpl::STPath& path, xrpl::STPathElement const& el)
 {
@@ -149,10 +184,65 @@ pathSetPushAlways(xrpl::STPathSet& set, xrpl::STPath const& path)
 pathElementKey(xrpl::STPathElement const& el)
 {
 #ifdef EDGY_XAHAU
-    return to_string(el.getCurrency());
+    // Currency alone collapses USD.GateHub and USD.Bitstamp into one slot.
+    std::string key = to_string(el.getCurrency());
+    if (el.hasIssuer() && el.getIssuerID() != xrpl::xrpAccount())
+    {
+        key += '.';
+        key += to_string(el.getIssuerID());
+    }
+    return key;
 #else
     return to_string(el.getPathAsset());
 #endif
+}
+
+// Pathfinder source hop: account + currency + issuer (rMx / RLUSD / rMx).
+// TypeAccount-only is for mid-issuer rippling after a book, not this.
+[[nodiscard]] inline xrpl::STPathElement
+sourceIssuerPathElement(xrpl::Asset const& srcAsset)
+{
+#ifdef EDGY_XAHAU
+    auto const issue =
+        srcAsset.holds<xrpl::Issue>() ? srcAsset.get<xrpl::Issue>() : xrpl::xrpIssue();
+    return xrpl::STPathElement(issue.account, issue.currency, issue.account);
+#else
+    return xrpl::STPathElement(srcAsset.getIssuer(), srcAsset, srcAsset.getIssuer());
+#endif
+}
+
+// Currency sequence only — same hops / different issuers look identical
+// in the UI and should not consume six path slots.
+[[nodiscard]] inline std::string
+hopCurrencyKey(xrpl::STPath const& path)
+{
+    std::string key;
+    key.reserve(path.size() * 16);
+    for (auto const& el : path)
+    {
+        if (pathElementIsAccount(el))
+            key += "a:";
+        key += pathElementKey(el);
+        key.push_back('/');
+    }
+    return key;
+}
+
+// Book hops only. Issuer-account inserts must not take a second slot of
+// the six (EVR and EVR→issuer→XAH crowded out USD/USDC on RLUSD→XAH).
+[[nodiscard]] inline std::string
+hopBookKey(xrpl::STPath const& path)
+{
+    std::string key;
+    key.reserve(path.size() * 16);
+    for (auto const& el : path)
+    {
+        if (pathElementIsAccount(el))
+            continue;
+        key += pathElementKey(el);
+        key.push_back('/');
+    }
+    return key;
 }
 
 }  // namespace edgy

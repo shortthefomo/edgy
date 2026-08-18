@@ -388,6 +388,66 @@ MemoryLedger::overlaySize() const
     return overlay_->size();
 }
 
+std::vector<MemoryLedger::key_type>
+MemoryLedger::sampleKeys(std::size_t n, std::uint32_t seed) const
+{
+    std::vector<key_type> out;
+    if (n == 0)
+        return out;
+    out.reserve(n);
+    auto seen = [&](key_type const& k) {
+        return std::find(out.begin(), out.end(), k) != out.end();
+    };
+    std::vector<key_type> mods;
+    if (overlay_ && base_)
+    {
+        for (auto const& [k, v] : *overlay_)
+        {
+            if (!v)
+                continue;
+            if (!base_->items.contains(k))
+                continue;
+            mods.push_back(k);
+        }
+    }
+    if (!mods.empty())
+    {
+        auto const cap = std::min(static_cast<std::size_t>((n + 1) / 2), mods.size());
+        auto const start = static_cast<std::size_t>(seed) % mods.size();
+        for (std::size_t i = 0; i < cap; ++i)
+            out.push_back(mods[(start + i) % mods.size()]);
+    }
+    auto isCreate = [&](key_type const& k) {
+        if (!overlay_ || !base_)
+            return false;
+        auto const it = overlay_->find(k);
+        if (it == overlay_->end() || !it->second)
+            return false;
+        return !base_->items.contains(k);
+    };
+    auto k = firstKey();
+    auto skip = static_cast<std::uint32_t>(seed % 32);
+    while (k && skip > 0)
+    {
+        k = succ(*k);
+        --skip;
+    }
+    for (; k && out.size() < n; k = succ(*k))
+    {
+        if (!seen(*k) && !isCreate(*k))
+            out.push_back(*k);
+    }
+    if (out.size() < n)
+    {
+        for (auto s = firstKey(); s && out.size() < n; s = succ(*s))
+        {
+            if (!seen(*s) && !isCreate(*s))
+                out.push_back(*s);
+        }
+    }
+    return out;
+}
+
 LedgerBuilder::LedgerBuilder()
     : base_(std::make_shared<MemoryLedger::Base>())
     , overlay_(std::make_shared<MemoryLedger::Overlay>())

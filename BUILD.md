@@ -243,7 +243,7 @@ On Apple Silicon, Docker builds `linux/amd64` (qemu). That is slow; the GitHub A
 
 `PLATFORM=linux/arm64 ./release-builder.sh` builds `*-linux-arm64` instead.
 
-Current release is `0.1.7`. After that tag, develop is `0.1.8-b6`. To cut the next release:
+Current release is `0.1.7`. After that tag, develop is `0.1.8-b42`. To cut the next release:
 
 ```bash
 # 1. set kVersionBase to "X.Y.Z" (and project(edgy VERSION X.Y.Z) if the

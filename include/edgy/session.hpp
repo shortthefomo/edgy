@@ -8,6 +8,7 @@
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Asset.h>
+#include <xrpl/protocol/PathAsset.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STPathSet.h>
 
@@ -21,10 +22,45 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <vector>
 
 namespace edgy {
 
 struct Config;
+
+// Auto source_currencies when the client omitted them. Never fails the
+// request: wallets with more sendable assets than maxSources are truncated
+// and the caller sets path_source_currencies_truncated.
+struct AutoSourcePick
+{
+    std::set<xrpl::Asset> assets;
+    bool truncated{false};
+};
+
+[[nodiscard]] AutoSourcePick
+pickAutoSources(
+    std::vector<xrpl::PathAsset> const& ordered,
+    xrpl::AccountID const& src,
+    xrpl::Asset const& dstAsset,
+    bool sameAccount,
+    std::size_t maxSources);
+
+// Isolated dest-AMM quote wins only when it is strictly cheaper (or
+// wider, convert-all) than Flowing the six together. Ties keep the
+// combined set — that is what a Payment with those paths actually pays.
+enum class QuotePick : bool
+{
+    Isolated = false,
+    Combined = true,
+};
+
+[[nodiscard]] inline QuotePick
+pickPublishedQuote(bool isolatedOk, bool combinedOk, bool isolatedStrictlyBetter)
+{
+    if (combinedOk && (!isolatedOk || !isolatedStrictlyBetter))
+        return QuotePick::Combined;
+    return QuotePick::Isolated;
+}
 
 /**
  * True when a subscription should run FastPathFinder again instead of
@@ -187,6 +223,7 @@ private:
     std::optional<xrpl::uint256> domain_;
     bool convertAll_{false};
     bool sourceCurrenciesTruncated_{false};
+    bool clobWalkFault_{false};
 
     bool lastSuccess_{false};
     xrpl::LedgerIndex lastFullSearchIndex_{0};

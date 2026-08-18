@@ -36,6 +36,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <optional>
+#include <set>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -77,6 +79,40 @@ main()
     using namespace edgy;
 
     expect(xrpl::rpc::tuning::kPathFindMaxPaths == 6, "max paths is 6 (xrpld)");
+    {
+        expect(pickPublishedQuote(false, true, false) == QuotePick::Combined,
+               "combined Flow is the quote when isolate failed");
+        expect(pickPublishedQuote(true, false, false) == QuotePick::Isolated,
+               "isolated dest hop is the quote when combined Flow fails");
+        expect(pickPublishedQuote(true, true, false) == QuotePick::Combined,
+               "tie / combined-not-worse publishes the six-path Flow");
+        expect(pickPublishedQuote(true, true, true) == QuotePick::Isolated,
+               "strictly better isolated dest AMM still wins");
+        expect(pickPublishedQuote(false, false, false) == QuotePick::Isolated,
+               "neither quote falls back to isolated");
+    }
+    {
+        auto const gw = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const gatehub = testAccount("rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq");
+        auto const xahIss = testAccount("rswh1fvyLqHizBS2awu1vs6QcmwTBd9qiv");
+        xrpl::Issue rlusd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gatehub};
+        xrpl::Issue xah{xrpl::toCurrency("XAH"), xahIss};
+        xrpl::STPath book;
+        pathPush(book, bookPathElement(usd));
+        pathPush(book, bookPathElement(xah));
+        xrpl::STPath pref;
+        pathPush(pref, sourceIssuerPathElement(rlusd));
+        for (auto const& el : book)
+            pathPush(pref, el);
+        expect(pathElementIsAccount(pref.front()), "source-issuer prefix is an account hop");
+        expect(!pathElementIsAccount(book.front()), "book path starts on a book hop");
+        expect(hopBookKey(pref) == hopBookKey(book),
+               "source-issuer prefix shares the book hub with the books-only path");
+        expect(hopCurrencyKey(pref) != hopCurrencyKey(book),
+               "prefix and books-only stay distinct isolate candidates");
+        expect(pref.size() == book.size() + 1, "prefix adds one hop");
+    }
     {
         auto const v = versionString();
         expect(v.find(kVersionBase) == 0, "version string starts with kVersionBase");
@@ -123,9 +159,129 @@ main()
     {
         // xrpld pubLedger sends ledgerClosed for N, then txs with ledger_index N.
         expect(shouldApplyStreamTx(100, 100), "tx for the just-closed ledger applies");
-        expect(shouldApplyStreamTx(101, 100), "tx for the next ledger applies");
+        expect(!shouldApplyStreamTx(101, 100), "next ledger does not apply early");
+        expect(shouldDeferStreamTx(101, 100), "next ledger is held until its close");
         expect(!shouldApplyStreamTx(99, 100), "tx for an older ledger is skipped");
         expect(shouldApplyStreamTx(0, 100), "tx with no ledger_index still applies");
+        expect(
+            !shouldApplyStreamTx(100, 100, 100),
+            "snapshot ledger txs are not replayed");
+        expect(
+            shouldApplyStreamTx(101, 101, 100),
+            "held tx applies once that ledger is current");
+        expect(
+            shouldDeferStreamTx(101, 100, 100),
+            "tx after the snapshot is held until its close");
+        expect(
+            compareObjectDigest(std::nullopt, std::nullopt) == ObjectDigestCmp::Match,
+            "digest both-absent is a match");
+        xrpl::uint256 a;
+        xrpl::uint256 b;
+        (void)a.parseHex("0100000000000000000000000000000000000000000000000000000000000001");
+        (void)b.parseHex("0200000000000000000000000000000000000000000000000000000000000002");
+        expect(
+            compareObjectDigest(a, a) == ObjectDigestCmp::Match, "digest equal hashes match");
+        expect(
+            compareObjectDigest(a, b) == ObjectDigestCmp::Mismatch, "digest unequal hashes drift");
+        expect(
+            compareObjectDigest(std::nullopt, a) == ObjectDigestCmp::MissingLocal,
+            "digest missing locally is drift");
+        expect(
+            compareObjectDigest(a, std::nullopt) == ObjectDigestCmp::MissingNode,
+            "digest missing on the node is drift");
+        expect(objectDigestIsDrift(ObjectDigestCmp::Mismatch), "mismatch is drift");
+        expect(!objectDigestIsDrift(ObjectDigestCmp::Match), "match is not drift");
+        expect(!objectDigestIsDrift(ObjectDigestCmp::Reencoded), "reencoded blob is not drift");
+        {
+            auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+            auto makeAcct = [&](std::int64_t drops) {
+                auto sle = std::make_shared<xrpl::SLE>(xrpl::keylet::account(src));
+                sle->setAccountID(xrpl::sfAccount, src);
+                sle->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{drops}});
+                sle->setFieldU32(xrpl::sfSequence, 1);
+                return sle;
+            };
+            auto node = makeAcct(10);
+            auto local = makeAcct(10);
+            expect(sleCoversNode(*local, *node), "identical accounts cover each other");
+            expect(sleCoversNode(*local, *local), "object covers itself");
+            auto other = makeAcct(11);
+            expect(!sleCoversNode(*local, *other), "different Balance does not cover the node");
+            expect(
+                std::string(sleFirstMismatch(*local, *other)) == "Balance",
+                "first mismatch names the Balance field");
+            xrpl::uint256 txA;
+            xrpl::uint256 txB;
+            (void)txA.parseHex(
+                "AA00000000000000000000000000000000000000000000000000000000000001");
+            (void)txB.parseHex(
+                "BB00000000000000000000000000000000000000000000000000000000000002");
+            node->setFieldH256(xrpl::sfPreviousTxnID, txA);
+            local->setFieldH256(xrpl::sfPreviousTxnID, txB);
+            expect(
+                sleCoversNode(*local, *node),
+                "PreviousTxnID is ignored by the drift checker");
+            xrpl::uint256 i1;
+            xrpl::uint256 i2;
+            (void)i1.parseHex(
+                "1100000000000000000000000000000000000000000000000000000000000001");
+            (void)i2.parseHex(
+                "2200000000000000000000000000000000000000000000000000000000000002");
+            auto makeDir = [&](xrpl::uint256 const& a, xrpl::uint256 const& b, char tag) {
+                xrpl::uint256 key;
+                std::string hex(64, tag);
+                (void)key.parseHex(hex);
+                auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+                xrpl::STVector256 idxs(xrpl::sfIndexes);
+                idxs.pushBack(a);
+                idxs.pushBack(b);
+                sle->setFieldV256(xrpl::sfIndexes, idxs);
+                return sle;
+            };
+            auto d1 = makeDir(i1, i2, 'A');
+            auto d2 = makeDir(i2, i1, 'B');
+            expect(sleCoversNode(*d1, *d2), "Indexes compare as a set, order ignored");
+            expect(indexesDiffText(*d1, *d2).empty(), "matching Indexes sets have empty diff");
+            auto d3 = makeDir(i1, i1, 'C');
+            expect(!indexesDiffText(*d1, *d3).empty(), "Indexes set mismatch has a diff string");
+            xrpl::uint256 da;
+            xrpl::uint256 db;
+            (void)da.parseHex("0100000000000000000000000000000000000000000000000000000000000001");
+            (void)db.parseHex("0200000000000000000000000000000000000000000000000000000000000002");
+            expect(
+                compareAppliedObject(da, db, local.get(), local.get()) ==
+                    ObjectDigestCmp::Reencoded,
+                "same fields with different blobs are reencoded");
+        }
+        expect(
+            std::string(clobWalkWhyText(ClobWalkWhy::Threw)) == "threw",
+            "clob walk why text for throw");
+        expect(
+            std::string(clobWalkWhyText(ClobWalkWhy::EmptyBook)) == "empty_book",
+            "clob walk why text for empty book");
+        ClobWalkResult emptyBook;
+        emptyBook.why = ClobWalkWhy::EmptyBook;
+        expect(!clobWalkIsFault(emptyBook), "empty book with no dirs is not a fault");
+        emptyBook.dirs = 2;
+        expect(clobWalkIsFault(emptyBook), "empty book with dirs present is a fault");
+        ClobWalkResult threw;
+        threw.why = ClobWalkWhy::Threw;
+        expect(clobWalkIsFault(threw), "thrown walk is a fault");
+        expect(!clobWalkIsFault(ClobWalkResult{}), "default empty result is not a fault");
+        expect(shouldDigestOnClose(0), "zero-tx close can digest immediately");
+        expect(!shouldDigestOnClose(44), "close with txs waits for apply");
+        expect(
+            shouldDigestAfterApply(44, 0, 44, 100, 99),
+            "digest after the close's txn_count is applied");
+        expect(
+            !shouldDigestAfterApply(43, 0, 44, 100, 99),
+            "do not digest while txs are still arriving");
+        expect(
+            !shouldDigestAfterApply(44, 0, 44, 100, 100),
+            "do not digest the same ledger twice");
+        expect(
+            !shouldDigestAfterApply(44, 0, 0, 100, 99),
+            "zero expected txs are handled on close");
         expect(applyTxsMatchNode(40, 0, 40), "all txs applied matches node");
         expect(applyTxsMatchNode(38, 2, 40), "applied + missing-meta matches node");
         expect(!applyTxsMatchNode(40, 391, 40), "parseFail must not be added into the tx check");
@@ -238,6 +394,77 @@ main()
         expect(stats.created == 1 || stats.incomplete == 1,
                "issued-amount Offer is applied");
         expect(b.contains(key), "issued-amount Offer is stored");
+    }
+
+    {
+        // Book-dir meta sometimes lands empty (Indexes 0!=1). After the tx,
+        // every live offer must appear in its BookDirectory page.
+        LedgerBuilder b;
+        LocalOrderBooks books;
+        xrpl::uint256 dirKey;
+        xrpl::uint256 offerKey;
+        (void)dirKey.parseHex(
+            "02000000000000000000000000000000000000000000000000000000000000BB");
+        (void)offerKey.parseHex(
+            "00700000000000000000000000000000000000000000000000000000000000AA");
+        auto dir = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, dirKey);
+        dir->setFieldH256(xrpl::sfRootIndex, dirKey);
+        dir->setFieldU64(xrpl::sfExchangeRate, 100);
+        dir->setFieldV256(xrpl::sfIndexes, xrpl::STVector256(xrpl::sfIndexes));
+        b.upsert(dir);
+
+        json::Value meta{json::ValueType::Object};
+        json::Value& nodes = (meta["AffectedNodes"] = json::ValueType::Array);
+        json::Value& wrap = nodes.append(json::ValueType::Object);
+        json::Value& created = (wrap["CreatedNode"] = json::ValueType::Object);
+        created["LedgerEntryType"] = "Offer";
+        created["LedgerIndex"] = to_string(offerKey);
+        json::Value& fields = (created["NewFields"] = json::ValueType::Object);
+        fields["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        fields["Sequence"] = 2;
+        fields["TakerGets"] = "1000000";
+        json::Value pays{json::ValueType::Object};
+        pays["currency"] = "USD";
+        pays["issuer"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        pays["value"] = "1";
+        fields["TakerPays"] = pays;
+        fields["BookDirectory"] = to_string(dirKey);
+        fields["BookNode"] = "0";
+        auto const stats = applyJsonAffectedNodes(b, books, meta);
+        expect(stats.parseFail == 0, "offer+empty book dir parse succeeds");
+        auto view = b.publish();
+        auto const got = view->read(xrpl::keylet::unchecked(dirKey));
+        expect(static_cast<bool>(got) && got->isFieldPresent(xrpl::sfIndexes),
+               "book dir still has Indexes");
+        bool found = false;
+        if (got)
+        {
+            for (auto const& x : got->getFieldV256(xrpl::sfIndexes))
+                found = found || x == offerKey;
+        }
+        expect(found, "empty book dir picks up the new offer (fixes 0!=1)");
+
+        json::Value del{json::ValueType::Object};
+        json::Value& dnodes = (del["AffectedNodes"] = json::ValueType::Array);
+        json::Value& dwrap = dnodes.append(json::ValueType::Object);
+        json::Value& deleted = (dwrap["DeletedNode"] = json::ValueType::Object);
+        deleted["LedgerEntryType"] = "Offer";
+        deleted["LedgerIndex"] = to_string(offerKey);
+        json::Value& dfinal = (deleted["FinalFields"] = json::ValueType::Object);
+        dfinal["Account"] = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+        dfinal["BookDirectory"] = to_string(dirKey);
+        dfinal["TakerGets"] = "1000000";
+        dfinal["TakerPays"] = pays;
+        applyJsonAffectedNodes(b, books, del);
+        auto view2 = b.publish();
+        auto const got2 = view2->read(xrpl::keylet::unchecked(dirKey));
+        bool still = false;
+        if (got2 && got2->isFieldPresent(xrpl::sfIndexes))
+        {
+            for (auto const& x : got2->getFieldV256(xrpl::sfIndexes))
+                still = still || x == offerKey;
+        }
+        expect(!still, "deleted offer is removed from the book dir");
     }
 
     {
@@ -1182,6 +1409,34 @@ main()
     }
 
     {
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        std::vector<xrpl::PathAsset> ordered;
+        ordered.emplace_back(xrpl::xrpCurrency());
+        for (int i = 0; i < 20; ++i)
+        {
+            char code[4] = {'U', 'S', static_cast<char>('A' + (i % 26)), 0};
+            ordered.emplace_back(xrpl::toCurrency(code));
+        }
+        auto const few =
+            pickAutoSources(ordered, src, xrpl::xrpIssue(), true, 18);
+        // Paying self XRP: skip native, keep 18 IOUs, truncate the rest.
+        expect(few.assets.size() == 18, "auto-source keeps kMaxSrcCur sendable assets");
+        expect(few.truncated, "auto-source truncates instead of failing past 18");
+        expect(!few.assets.contains(xrpl::xrpIssue()),
+               "auto-source omits XRP when src==dst and dest is XRP");
+
+        auto const all = pickAutoSources(ordered, src, xrpl::xrpIssue(), false, 18);
+        expect(all.assets.size() == 18, "auto-source cap still 18 when src!=dst");
+        expect(all.truncated, "auto-source still truncates when XRP is eligible");
+        expect(all.assets.contains(xrpl::xrpIssue()),
+               "auto-source keeps XRP first when dest is another account");
+
+        auto const small = pickAutoSources(ordered, src, xrpl::xrpIssue(), true, 6);
+        expect(small.assets.size() == 6, "auto-source honours a smaller budget");
+        expect(small.truncated, "smaller budget still reports truncated");
+    }
+
+    {
         boost::asio::io_context io;
         PathServices services(io);
         LedgerBuilder b;
@@ -1277,6 +1532,37 @@ main()
         expect(found.isolateRank, "fixed-amount still isolate-ranks the shortlist");
         expect(found.candidates > 0, "2-hop graph yields candidates");
         expect(!found.paths.empty(), "empty ledger falls back to cheap-scored 2-hop order");
+        bool sawIssuer = false;
+        for (auto const& path : found.discovered)
+        {
+            for (auto const& el : path)
+            {
+                if (pathElementIsAccount(el))
+                    sawIssuer = true;
+            }
+        }
+        expect(found.candidates > static_cast<int>(found.paths.size()),
+               "issuer-bridge variants are extra candidates, not extra published slots");
+        expect(sawIssuer || found.candidates >= 2,
+               "2-hop IOU pairs also emit a book→issuer-account variant");
+        {
+            std::set<std::string> hubs;
+            bool uniqueHubs = true;
+            for (auto const& path : found.paths)
+            {
+                std::string hub;
+                for (auto const& el : path)
+                {
+                    if (pathElementIsAccount(el))
+                        continue;
+                    hub += pathElementKey(el);
+                    hub += '/';
+                }
+                if (!hubs.insert(hub).second)
+                    uniqueHubs = false;
+            }
+            expect(uniqueHubs, "published six do not spend two slots on issuer-bridge twins");
+        }
         bool sawBest = false;
         if (!found.paths.empty())
         {
@@ -1655,6 +1941,156 @@ main()
                "paths_computed matches xrpld");
         expect(result[xrpl::jss::alternatives][0u].isMember(xrpl::jss::source_amount),
                "source_amount matches xrpld");
+    }
+
+    {
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 7;
+        h.parentCloseTime = xrpl::NetClock::time_point{std::chrono::seconds{1'000}};
+        b.setHeader(h);
+        auto const maker = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const issuer = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto acct = std::make_shared<xrpl::SLE>(xrpl::keylet::account(maker));
+        acct->setAccountID(xrpl::sfAccount, maker);
+        acct->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{100'000'000'000}});
+        acct->setFieldU32(xrpl::sfSequence, 1);
+        acct->setFieldU32(xrpl::sfOwnerCount, 1);
+        acct->setFieldU32(xrpl::sfFlags, 0);
+        b.upsert(acct);
+
+        xrpl::Issue const usd{xrpl::toCurrency("USD"), issuer};
+        xrpl::STAmount const pays{usd, 100};
+        xrpl::STAmount const gets{xrpl::xrpIssue(), 50'000'000};
+        auto const book = makeBook(usd, xrpl::xrpIssue());
+        auto const q = xrpl::getRate(gets, pays);
+        auto const dirKl = xrpl::keylet::quality(xrpl::keylet::book(book), q);
+        xrpl::uint256 offerKey;
+        (void)offerKey.parseHex(
+            "0A00000000000000000000000000000000000000000000000000000000000001");
+        auto offer = std::make_shared<xrpl::SLE>(xrpl::ltOFFER, offerKey);
+        offer->setAccountID(xrpl::sfAccount, maker);
+        offer->setFieldU32(xrpl::sfSequence, 1);
+        offer->setFieldAmount(xrpl::sfTakerPays, pays);
+        offer->setFieldAmount(xrpl::sfTakerGets, gets);
+        offer->setFieldH256(xrpl::sfBookDirectory, dirKl.key);
+        offer->setFieldU64(xrpl::sfBookNode, 0);
+        b.upsert(offer);
+        auto dir = std::make_shared<xrpl::SLE>(dirKl);
+        dir->setFieldH256(xrpl::sfRootIndex, dirKl.key);
+        dir->setFieldU64(xrpl::sfExchangeRate, q);
+        dir->setFieldH160(xrpl::sfTakerPaysCurrency, usd.currency);
+        dir->setFieldH160(xrpl::sfTakerPaysIssuer, usd.account);
+        dir->setFieldH160(xrpl::sfTakerGetsCurrency, xrpl::xrpIssue().currency);
+        dir->setFieldH160(xrpl::sfTakerGetsIssuer, xrpl::xrpIssue().account);
+        xrpl::STVector256 idxs(xrpl::sfIndexes);
+        idxs.pushBack(offerKey);
+        dir->setFieldV256(xrpl::sfIndexes, idxs);
+        b.upsert(dir);
+
+        auto view = b.publish();
+        auto const emptyWant = clobBookTake(*view, book, xrpl::STAmount{usd, 0});
+        expect(emptyWant.why == ClobWalkWhy::EmptyWant, "zero want is empty_want not a throw");
+        expect(!clobWalkIsFault(emptyWant), "zero want is not a walk fault");
+
+        auto const took = clobBookTake(*view, book, xrpl::STAmount{usd, 10});
+        expect(took.ok(), "funded CLOB walk returns an amount");
+        expect(took.taken == 1, "funded CLOB walk takes the tip offer");
+        expect(took.dirs >= 1, "funded CLOB walk sees the book directory");
+        expect(took.out && *took.out == xrpl::STAmount{xrpl::xrpIssue(), 5'000'000},
+               "10 USD at 100/50 XRP delivers 5 XRP");
+
+        auto const leftover = clobBookTake(*view, book, xrpl::STAmount{usd, 100});
+        expect(leftover.ok(), "full-offer take does not throw leftover dust");
+        expect(leftover.out && *leftover.out == gets, "taking the whole offer yields TakerGets");
+
+        xrpl::Issue const eur{xrpl::toCurrency("EUR"), issuer};
+        auto const noBook = clobBookTake(*view, makeBook(usd, eur), xrpl::STAmount{usd, 10});
+        expect(noBook.why == ClobWalkWhy::EmptyBook, "missing book is empty_book");
+        expect(!clobWalkIsFault(noBook), "missing book is not a fault");
+
+        auto const na = nativeBridgeClobOut(*view, xrpl::STAmount{xrpl::xrpIssue(), 1}, eur);
+        expect(na.why == ClobWalkWhy::NotApplicable, "XRP source is not a native-bridge walk");
+
+        // Overlay sample: mutate the maker (exists in the snapshot) and add a
+        // brand-new issuer account. Digest sampling should prefer the modify
+        // and skip the create (next-ledger objects look like missing_node).
+        auto maker2 = std::make_shared<xrpl::SLE>(xrpl::keylet::account(maker));
+        maker2->setAccountID(xrpl::sfAccount, maker);
+        maker2->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{99'000'000'000}});
+        maker2->setFieldU32(xrpl::sfSequence, 2);
+        maker2->setFieldU32(xrpl::sfOwnerCount, 1);
+        maker2->setFieldU32(xrpl::sfFlags, 0);
+        b.upsert(maker2);
+        auto extra = std::make_shared<xrpl::SLE>(xrpl::keylet::account(issuer));
+        extra->setAccountID(xrpl::sfAccount, issuer);
+        extra->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{1'000'000}});
+        extra->setFieldU32(xrpl::sfSequence, 1);
+        extra->setFieldU32(xrpl::sfOwnerCount, 0);
+        extra->setFieldU32(xrpl::sfFlags, 0);
+        b.upsert(extra);
+        auto overlayView = b.publish();
+        auto const overlayKeys = overlayView->sampleKeys(8);
+        expect(!overlayKeys.empty(), "sampleKeys returns live objects");
+        bool sawMaker = false;
+        bool sawIssuer = false;
+        for (auto const& k : overlayKeys)
+        {
+            sawMaker = sawMaker || k == xrpl::keylet::account(maker).key;
+            sawIssuer = sawIssuer || k == xrpl::keylet::account(issuer).key;
+        }
+        expect(sawMaker, "sampleKeys includes snapshot objects modified in the overlay");
+        expect(!sawIssuer, "sampleKeys skips post-snapshot creates");
+    }
+
+    {
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 8;
+        h.parentCloseTime = xrpl::NetClock::time_point{std::chrono::seconds{1'000}};
+        b.setHeader(h);
+        auto const maker = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const issuer = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto acct = std::make_shared<xrpl::SLE>(xrpl::keylet::account(maker));
+        acct->setAccountID(xrpl::sfAccount, maker);
+        acct->setFieldAmount(xrpl::sfBalance, xrpl::STAmount{xrpl::XRPAmount{0}});
+        acct->setFieldU32(xrpl::sfSequence, 1);
+        acct->setFieldU32(xrpl::sfOwnerCount, 1);
+        acct->setFieldU32(xrpl::sfFlags, 0);
+        b.upsert(acct);
+        xrpl::Issue const usd{xrpl::toCurrency("USD"), issuer};
+        xrpl::STAmount const pays{usd, 100};
+        xrpl::STAmount const gets{xrpl::xrpIssue(), 50'000'000};
+        auto const book = makeBook(usd, xrpl::xrpIssue());
+        auto const q = xrpl::getRate(gets, pays);
+        auto const dirKl = xrpl::keylet::quality(xrpl::keylet::book(book), q);
+        xrpl::uint256 offerKey;
+        (void)offerKey.parseHex(
+            "0A00000000000000000000000000000000000000000000000000000000000002");
+        auto offer = std::make_shared<xrpl::SLE>(xrpl::ltOFFER, offerKey);
+        offer->setAccountID(xrpl::sfAccount, maker);
+        offer->setFieldU32(xrpl::sfSequence, 1);
+        offer->setFieldAmount(xrpl::sfTakerPays, pays);
+        offer->setFieldAmount(xrpl::sfTakerGets, gets);
+        offer->setFieldH256(xrpl::sfBookDirectory, dirKl.key);
+        offer->setFieldU64(xrpl::sfBookNode, 0);
+        b.upsert(offer);
+        auto dir = std::make_shared<xrpl::SLE>(dirKl);
+        dir->setFieldH256(xrpl::sfRootIndex, dirKl.key);
+        dir->setFieldU64(xrpl::sfExchangeRate, q);
+        dir->setFieldH160(xrpl::sfTakerPaysCurrency, usd.currency);
+        dir->setFieldH160(xrpl::sfTakerPaysIssuer, usd.account);
+        dir->setFieldH160(xrpl::sfTakerGetsCurrency, xrpl::xrpIssue().currency);
+        dir->setFieldH160(xrpl::sfTakerGetsIssuer, xrpl::xrpIssue().account);
+        xrpl::STVector256 idxs(xrpl::sfIndexes);
+        idxs.pushBack(offerKey);
+        dir->setFieldV256(xrpl::sfIndexes, idxs);
+        b.upsert(dir);
+        auto view = b.publish();
+        auto const unfunded = clobBookTake(*view, book, xrpl::STAmount{usd, 10});
+        expect(unfunded.why == ClobWalkWhy::EmptyBook, "unfunded tip is empty_book");
+        expect(unfunded.skippedUnfunded >= 1, "unfunded tip is counted");
+        expect(clobWalkIsFault(unfunded), "book present but unfunded is a walk fault");
     }
 
     {

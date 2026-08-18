@@ -17,6 +17,7 @@
 #include <xrpl/ledger/PaymentSandbox.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/AccountID.h>
+#include <xrpl/protocol/Rules.h>
 #include <xrpl/protocol/Asset.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -403,6 +404,7 @@ Pathfinder::getPathLiquidity(
         if (convertAll_)
             rcInput.partialPaymentAllowed = true;
 
+        CurrentTransactionRulesGuard const rules{ledger_->rules()};
         auto rc = path::RippleCalc::rippleCalculate(
             sandbox,
             srcAmount_,
@@ -459,6 +461,7 @@ Pathfinder::computePathRanks(int maxPaths, std::function<bool(void)> const& cont
     try
     {
         PaymentSandbox sandbox(&*ledger_, TapNone);
+        CurrentTransactionRulesGuard const rules{ledger_->rules()};
 
         path::RippleCalc::Input rcInput;
         rcInput.partialPaymentAllowed = true;

@@ -3,6 +3,7 @@
 #include <edgy/config.hpp>
 #include <edgy/memory_ledger.hpp>
 #include <edgy/node_client.hpp>
+#include <edgy/protocol.hpp>
 #include <edgy/services.hpp>
 #include <edgy/session.hpp>
 
@@ -18,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -54,12 +56,89 @@ planApplyCycle(bool stop, bool ready, bool queueEmpty) noexcept
 }
 
 // xrpld publishes ledgerClosed for N, then the validated txs for N.
-// Skip only older ledgers — seq == currentSeq must still apply.
+// Skip older ledgers (and the snapshot ledger). Hold a newer ledger's
+// txs until that ledger closes — applying them early dirties Indexes
+// and Balance when we digest N against the node.
 [[nodiscard]] inline bool
-shouldApplyStreamTx(std::uint32_t txSeq, std::uint32_t currentSeq) noexcept
+shouldApplyStreamTx(
+    std::uint32_t txSeq,
+    std::uint32_t currentSeq,
+    std::uint32_t snapshotSeq = 0) noexcept
 {
-    return txSeq == 0 || txSeq >= currentSeq;
+    if (txSeq == 0)
+        return true;
+    if (snapshotSeq != 0 && txSeq <= snapshotSeq)
+        return false;
+    return txSeq == currentSeq;
 }
+
+[[nodiscard]] inline bool
+shouldDeferStreamTx(
+    std::uint32_t txSeq,
+    std::uint32_t currentSeq,
+    std::uint32_t snapshotSeq = 0) noexcept
+{
+    if (txSeq == 0)
+        return false;
+    if (snapshotSeq != 0 && txSeq <= snapshotSeq)
+        return false;
+    return txSeq > currentSeq;
+}
+
+// Local vs node object. Blob hashes differ after apply because we
+// re-serialize metadata; that is Reencoded, not drift. Drift is a missing
+// object or a node field we do not have / have a different value for.
+enum class ObjectDigestCmp : std::uint8_t
+{
+    Match = 0,
+    MissingLocal,
+    MissingNode,
+    Mismatch,
+    Reencoded,
+};
+
+[[nodiscard]] inline ObjectDigestCmp
+compareObjectDigest(
+    std::optional<xrpl::uint256> const& local,
+    std::optional<xrpl::uint256> const& node) noexcept
+{
+    if (!local && !node)
+        return ObjectDigestCmp::Match;
+    if (!local)
+        return ObjectDigestCmp::MissingLocal;
+    if (!node)
+        return ObjectDigestCmp::MissingNode;
+    return *local == *node ? ObjectDigestCmp::Match : ObjectDigestCmp::Mismatch;
+}
+
+[[nodiscard]] inline ObjectDigestCmp
+compareAppliedObject(
+    std::optional<xrpl::uint256> const& localDigest,
+    std::optional<xrpl::uint256> const& nodeDigest,
+    xrpl::STObject const* local,
+    xrpl::STObject const* node)
+{
+    if (!local && !node)
+        return ObjectDigestCmp::Match;
+    if (!local)
+        return ObjectDigestCmp::MissingLocal;
+    if (!node)
+        return ObjectDigestCmp::MissingNode;
+    if (localDigest && nodeDigest && *localDigest == *nodeDigest)
+        return ObjectDigestCmp::Match;
+    if (sleCoversNode(*local, *node))
+        return ObjectDigestCmp::Reencoded;
+    return ObjectDigestCmp::Mismatch;
+}
+
+[[nodiscard]] inline bool
+objectDigestIsDrift(ObjectDigestCmp c) noexcept
+{
+    return c == ObjectDigestCmp::Mismatch || c == ObjectDigestCmp::MissingLocal ||
+        c == ObjectDigestCmp::MissingNode;
+}
+
+inline constexpr int kDigestDriftResync = 2;
 
 // nodeTxs is the previous close's txn_count. applyTxs is txs we processed;
 // noMeta is txs that arrived with no meta at all. Per-node parseFail must
@@ -71,6 +150,29 @@ applyTxsMatchNode(
     std::uint32_t nodeTxs) noexcept
 {
     return nodeTxs == 0 || applyTxs + noMeta == nodeTxs;
+}
+
+// xrpld sends ledgerClosed N, then the validated txs for N. Checking at
+// close compares local N-1 to node N (Balance/Indexes look wrong). Digest
+// after the close's txn_count has been applied, or immediately when the
+// close has no txs.
+[[nodiscard]] inline bool
+shouldDigestOnClose(std::uint32_t txnCount) noexcept
+{
+    return txnCount == 0;
+}
+
+[[nodiscard]] inline bool
+shouldDigestAfterApply(
+    std::uint64_t applyTxs,
+    std::uint64_t noMeta,
+    std::uint32_t expectedTxs,
+    std::uint32_t currentSeq,
+    std::uint32_t lastDigestSeq) noexcept
+{
+    if (expectedTxs == 0 || currentSeq == 0 || currentSeq == lastDigestSeq)
+        return false;
+    return applyTxsMatchNode(applyTxs, noMeta, expectedTxs);
 }
 
 // Apply stream JSON meta (AffectedNodes). Used by the live apply path and tests.
@@ -170,6 +272,12 @@ private:
     applyTransaction(json::Value const& msg);
 
     void
+    scheduleDigestCheck();
+
+    void
+    runDigestCheck(std::shared_ptr<MemoryLedger const> const& view);
+
+    void
     publishBuilder(bool rebuildBooks);
 
     void
@@ -218,6 +326,7 @@ private:
     std::atomic<std::uint64_t> objects_{0};
     std::atomic<std::uint32_t> firstSeq_{0};
     std::atomic<std::uint32_t> currentSeq_{0};
+    std::atomic<std::uint32_t> snapshotSeq_{0};
     std::function<void(json::Value)> ledgerClosedHandler_;
     std::mutex handlerMutex_;
 
@@ -250,6 +359,7 @@ private:
 
     // Apply-thread only. Reset after each closed ledger / snapshot.
     std::uint64_t applyTxs_{0};
+    std::uint64_t applyLedgerTxs_{0};
     std::uint64_t applyNoMeta_{0};
     std::uint64_t applyParseFail_{0};
     std::uint64_t applySkipped_{0};
@@ -258,6 +368,21 @@ private:
     std::uint64_t applyDeleted_{0};
     std::uint64_t applyModified_{0};
     std::uint64_t applyIncomplete_{0};
+    std::vector<json::Value> pendingFutureTxs_;
+
+    std::atomic<bool> digestCheckBusy_{false};
+    std::atomic<std::uint32_t> digestChecked_{0};
+    std::atomic<std::uint32_t> digestMatched_{0};
+    std::atomic<std::uint32_t> digestMismatch_{0};
+    std::atomic<std::uint32_t> digestMissingLocal_{0};
+    std::atomic<std::uint32_t> digestMissingNode_{0};
+    std::atomic<std::uint32_t> digestReencoded_{0};
+    std::atomic<std::uint32_t> digestLastSeq_{0};
+    std::atomic<std::uint32_t> digestDoneSeq_{0};
+    std::atomic<bool> digestDrift_{false};
+
+    void
+    maybeDigestAfterApply();
 
     void
     resetApplyStats();

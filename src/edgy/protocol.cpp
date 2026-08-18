@@ -13,6 +13,7 @@
 #include <xrpl/protocol/jss.h>
 
 #include <cctype>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -467,6 +468,129 @@ sleFromBinary(std::string const& dataHex, std::string const& indexHex)
     if (!key.parseHex(indexHex))
         return nullptr;
     return sleFromBlob(*blob, key);
+}
+
+namespace {
+
+bool
+isAmountField(xrpl::SField const& field)
+{
+    return field == xrpl::sfBalance || field == xrpl::sfTakerPays || field == xrpl::sfTakerGets ||
+        field == xrpl::sfLowLimit || field == xrpl::sfHighLimit
+#ifndef EDGY_XAHAU
+        || field == xrpl::sfLPTokenBalance
+#endif
+        ;
+}
+
+bool
+stAmountsMatch(xrpl::STAmount const& a, xrpl::STAmount const& b)
+{
+    if (a.signum() == 0 && b.signum() == 0)
+        return true;
+    if (a.native() && b.native())
+        return a.xrp() == b.xrp();
+    return a == b;
+}
+
+std::pair<std::set<xrpl::uint256>, std::set<xrpl::uint256>>
+indexSets(xrpl::STObject const& local, xrpl::STObject const& node)
+{
+    std::set<xrpl::uint256> sa;
+    std::set<xrpl::uint256> sb;
+    if (local.isFieldPresent(xrpl::sfIndexes))
+    {
+        for (auto const& x : local.getFieldV256(xrpl::sfIndexes))
+            sa.insert(x);
+    }
+    if (node.isFieldPresent(xrpl::sfIndexes))
+    {
+        for (auto const& x : node.getFieldV256(xrpl::sfIndexes))
+            sb.insert(x);
+    }
+    return {std::move(sa), std::move(sb)};
+}
+
+bool
+indexesMatch(xrpl::STObject const& local, xrpl::STObject const& node)
+{
+    auto const [sa, sb] = indexSets(local, node);
+    return sa == sb;
+}
+
+}  // namespace
+
+char const*
+sleFirstMismatch(xrpl::STObject const& local, xrpl::STObject const& node)
+{
+    // Path-find state only. PreviousTxnID / BookNode / dir-page links change
+    // on every apply rewrite and are not used for quoting.
+    static xrpl::SField const* const kFields[] = {
+        &xrpl::sfAccount,
+        &xrpl::sfBalance,
+        &xrpl::sfSequence,
+        &xrpl::sfOwnerCount,
+        &xrpl::sfTakerPays,
+        &xrpl::sfTakerGets,
+        &xrpl::sfBookDirectory,
+        &xrpl::sfIndexes,
+        &xrpl::sfExchangeRate,
+        &xrpl::sfRootIndex,
+        &xrpl::sfLowLimit,
+        &xrpl::sfHighLimit,
+#ifndef EDGY_XAHAU
+        &xrpl::sfLPTokenBalance,
+        &xrpl::sfAsset,
+        &xrpl::sfAsset2,
+        &xrpl::sfTradingFee,
+#endif
+    };
+    for (auto const* field : kFields)
+    {
+        bool const nHas = node.isFieldPresent(*field);
+        bool const lHas = local.isFieldPresent(*field);
+        if (!nHas && !lHas)
+            continue;
+        if (nHas != lHas)
+            return field->getName().c_str();
+        if (isAmountField(*field))
+        {
+            if (!stAmountsMatch(local.getFieldAmount(*field), node.getFieldAmount(*field)))
+                return field->getName().c_str();
+            continue;
+        }
+        if (*field == xrpl::sfIndexes)
+        {
+            if (!indexesMatch(local, node))
+                return field->getName().c_str();
+            continue;
+        }
+        if (local.peekAtField(*field) != node.peekAtField(*field))
+            return field->getName().c_str();
+    }
+    return nullptr;
+}
+
+std::string
+indexesDiffText(xrpl::STObject const& local, xrpl::STObject const& node)
+{
+    auto const [sa, sb] = indexSets(local, node);
+    if (sa == sb)
+        return {};
+    int extra = 0;
+    int missing = 0;
+    for (auto const& x : sa)
+    {
+        if (!sb.contains(x))
+            ++extra;
+    }
+    for (auto const& x : sb)
+    {
+        if (!sa.contains(x))
+            ++missing;
+    }
+    return std::to_string(sa.size()) + "!=" + std::to_string(sb.size()) + " +" +
+        std::to_string(extra) + "-" + std::to_string(missing);
 }
 
 bool
