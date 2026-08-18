@@ -89,6 +89,8 @@ main()
         expect(d.searchFast == Config::kSearchFull, "default [search-fast] is full");
         expect(d.searchTimeout.count() == 0, "default [timeout-ms] is none");
         expect(d.fullSnapshot, "default [full-snapshot] is full");
+        expect(d.snapshotPage == Config::kSnapshotPageMax,
+               "default [snapshot-page] is 2048");
         expect(d.midCloseDelay.count() == 100, "default [update-ms] is 100");
         expect(d.network == NetworkKind::xrpl, "xrpld binary is xrpl");
         expect(!d.xahau(), "xrpld binary is not xahau");
@@ -313,7 +315,8 @@ main()
                 << "[search]\nfull\n"
                 << "[search-fast]\nfull\n"
                 << "[timeout-ms]\n0\n"
-                << "[full-snapshot]\nfull\n";
+                << "[full-snapshot]\nfull\n"
+                << "[snapshot-page]\n2048\n";
         }
         auto const cfg = Config::fromFile(path);
         expect(cfg.debugLog == "/private/tmp/edgy.log", "stanza [debug]");
@@ -332,6 +335,7 @@ main()
         expect(cfg.searchFast == Config::kSearchFull, "stanza [search-fast] full");
         expect(cfg.searchTimeout.count() == 0, "stanza [timeout-ms] 0");
         expect(cfg.fullSnapshot, "stanza [full-snapshot] full");
+        expect(cfg.snapshotPage == 2048, "stanza [snapshot-page] 2048");
         expect(cfg.network == NetworkKind::xrpl, "file cannot change compile-time network");
     }
 
@@ -354,13 +358,15 @@ main()
             out << "[search]\n2\n"
                 << "[search-fast]\nfast\n"
                 << "[timeout-ms]\n250\n"
-                << "[full-snapshot]\nbooks\n";
+                << "[full-snapshot]\nbooks\n"
+                << "[snapshot-page]\n256\n";
         }
         auto const cfg = Config::fromFile(path);
         expect(cfg.search == 2, "stanza [search] 2");
         expect(cfg.searchFast == 0, "stanza [search-fast] fast");
         expect(cfg.searchTimeout.count() == 250, "stanza [timeout-ms] 250");
         expect(!cfg.fullSnapshot, "stanza [full-snapshot] books");
+        expect(cfg.snapshotPage == 256, "stanza [snapshot-page] 256");
     }
 
     {
@@ -391,12 +397,15 @@ main()
         char a6[] = "100";
         char a7[] = "--full-snapshot";
         char a8[] = "0";
-        char* argv[] = {arg0, a1, a2, a3, a4, a5, a6, a7, a8, nullptr};
-        auto const cfg = Config::fromArgs(9, argv);
+        char a9[] = "--snapshot-page";
+        char a10[] = "512";
+        char* argv[] = {arg0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, nullptr};
+        auto const cfg = Config::fromArgs(11, argv);
         expect(cfg.search == Config::kSearchFull, "CLI --search full");
         expect(cfg.searchFast == 0, "CLI --search-fast 0");
         expect(cfg.searchTimeout.count() == 100, "CLI --timeout-ms 100");
         expect(!cfg.fullSnapshot, "CLI --full-snapshot 0");
+        expect(cfg.snapshotPage == 512, "CLI --snapshot-page 512");
     }
 
     {
@@ -502,7 +511,8 @@ main()
         {
             std::ofstream out(path);
             out << "[workers]\n0\n[net-threads]\n0\n[update-ms]\n1\n"
-                << "[search]\n2\n[search-fast]\n4\n[timeout-ms]\n-5\n";
+                << "[search]\n2\n[search-fast]\n4\n[timeout-ms]\n-5\n"
+                << "[snapshot-page]\n0\n";
         }
         auto const cfg = Config::fromFile(path);
         expect(cfg.workers == 1, "workers 0 clamps to 1");
@@ -511,6 +521,7 @@ main()
         expect(cfg.search == 2, "search 2 is kept");
         expect(cfg.searchFast == 2, "search-fast clamps to search");
         expect(cfg.searchTimeout.count() == 0, "negative timeout-ms clamps to 0");
+        expect(cfg.snapshotPage == 1, "snapshot-page 0 clamps to 1");
     }
 
     {
@@ -521,6 +532,17 @@ main()
         }
         auto const cfg = Config::fromFile(path);
         expect(cfg.workers == 256, "workers above 256 clamp to 256");
+    }
+
+    {
+        auto const path = std::string{"/tmp/edgy-test-snapshot-page-max.cfg"};
+        {
+            std::ofstream out(path);
+            out << "[snapshot-page]\n99999\n";
+        }
+        auto const cfg = Config::fromFile(path);
+        expect(cfg.snapshotPage == Config::kSnapshotPageMax,
+               "snapshot-page above 2048 clamps to 2048");
     }
 
     {
@@ -656,6 +678,8 @@ main()
                 expect(cfg.search == Config::kSearchFull, search.c_str());
                 expect(cfg.searchFast == Config::kSearchFull, searchFast.c_str());
                 expect(cfg.fullSnapshot, snapshot.c_str());
+                auto snapPage = std::string{"shipped [snapshot-page] 2048 "} + spec.label;
+                expect(cfg.snapshotPage == 2048, snapPage.c_str());
                 auto workers = std::string{"shipped [workers] "} + spec.label;
                 auto proxy = std::string{"shipped [proxy] "} + spec.label;
                 auto update = std::string{"shipped [update-ms] "} + spec.label;

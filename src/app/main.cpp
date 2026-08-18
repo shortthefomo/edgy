@@ -280,7 +280,8 @@ main(int argc, char** argv)
                           ? std::string("none")
                           : std::to_string(cfg.searchTimeout.count()) + "ms")
                   << '\n'
-                  << "  snapshot  " << (cfg.fullSnapshot ? "full" : "books") << '\n';
+                  << "  snapshot  " << (cfg.fullSnapshot ? "full" : "books")
+                  << " page=" << cfg.snapshotPage << '\n';
         if (!cfg.debugLog.empty())
             std::cerr << "  debug     " << cfg.debugLog << '\n';
         std::cerr << "waiting for snapshot (path_info.server_state = syncing until ready)\n";

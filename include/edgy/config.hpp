@@ -41,6 +41,9 @@ struct Config
 
     bool proxyOther{true};
     bool fullSnapshot{true};
+    // Binary ledger_data page size. xrpld/xahaud cap non-admin at 2048.
+    static constexpr int kSnapshotPageMax = 2048;
+    int snapshotPage{kSnapshotPageMax};
 
 #ifdef EDGY_XAHAU
     static constexpr NetworkKind network = NetworkKind::xahau;

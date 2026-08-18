@@ -896,7 +896,7 @@ Engine::loadSnapshot()
             // String index: Clio/public hubs accept it; numeric can fail.
             req[xrpl::jss::ledger_index] = std::to_string(header.seq);
             req[xrpl::jss::binary] = true;
-            req[xrpl::jss::limit] = 256;
+            req[xrpl::jss::limit] = cfg_.snapshotPage;
             if (type)
                 req[xrpl::jss::type] = *type;
             if (!marker.isNull())

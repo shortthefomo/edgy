@@ -30,6 +30,7 @@ usage()
         << "  --search-fast <full|fast|N> First WebSocket reply depth (default full)\n"
         << "  --timeout-ms <n>            Abort one search after N ms (0 = none)\n"
         << "  --full-snapshot [0|1|full]  Full ledger vs books-only (default full)\n"
+        << "  --snapshot-page <n>         ledger_data objects per page (default 2048)\n"
         << "  --no-proxy                  Do not forward unknown RPCs to the node\n"
         << "  --version                   Print version and exit\n"
         << "  --help\n"
@@ -38,6 +39,7 @@ usage()
         << "  [node]  [listen-ws]  [listen-rpc]  [workers]  [net-threads]\n"
         << "  [update-ms]  [proxy]  [debug]\n"
         << "  [search]  [search-fast]  [timeout-ms]  [full-snapshot]\n"
+        << "  [snapshot-page]\n"
         << "  [max_total_lines]  [max_lines_per_account]\n"
         << "  [line_chunk_size]  [cache_reuse_ledgers]\n"
         << "  [path_find]  (optional key=value block for the four line-cache keys)\n";
@@ -158,6 +160,9 @@ applyScalar(Config& cfg, std::string const& section, std::string const& value)
         cfg.searchTimeout = parseTimeout(value);
     else if (section == "full-snapshot")
         cfg.fullSnapshot = parseSnapshot(value);
+    else if (section == "snapshot-page" || section == "snapshot-limit" ||
+             section == "ledger-data-limit")
+        cfg.snapshotPage = std::stoi(value);
     else if (section == "network" || section == "node-type")
         ;  // leftover from the single-binary switch; family is the executable
     else if (section == "max-total-lines")
@@ -216,6 +221,10 @@ clamp(Config& cfg)
     cfg.searchFast = std::clamp(cfg.searchFast, 0, cfg.search);
     if (cfg.searchTimeout.count() < 0)
         cfg.searchTimeout = std::chrono::milliseconds{0};
+    if (cfg.snapshotPage < 1)
+        cfg.snapshotPage = 1;
+    if (cfg.snapshotPage > Config::kSnapshotPageMax)
+        cfg.snapshotPage = Config::kSnapshotPageMax;
 }
 
 }  // namespace
@@ -362,6 +371,10 @@ Config::fromArgs(int argc, char** argv)
         else if (arg == "--no-full-snapshot")
         {
             cli.emplace_back("full-snapshot", "0");
+        }
+        else if (arg == "--snapshot-page")
+        {
+            cli.emplace_back("snapshot-page", need("--snapshot-page"));
         }
         else if (!arg.empty() && arg.front() != '-' &&
                  (arg.ends_with(".cfg") || arg.ends_with(".conf")))

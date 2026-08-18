@@ -136,6 +136,9 @@ full
 [full-snapshot]
 full
 
+[snapshot-page]
+2048
+
 [max_total_lines]
 1000000
 
@@ -172,6 +175,7 @@ On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_
 | `[search-fast]` / `--search-fast` | First WebSocket reply depth (default `full`) |
 | `[timeout-ms]` / `--timeout-ms` | Abort one search after N ms (`0` / `full` = none) |
 | `[full-snapshot]` / `--full-snapshot` | `full` (default) loads every object; `0` / `books` loads path types only |
+| `[snapshot-page]` / `--snapshot-page` | Binary `ledger_data` objects per page (1–2048, default 2048) |
 | `[max_total_lines]` | Trust-line cache cap |
 | `[max_lines_per_account]` | Per-account line cap |
 | `[line_chunk_size]` | Line-fetch chunk |

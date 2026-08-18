@@ -112,10 +112,11 @@ runPaidQuote(
     xrpl::STPathSet const& paths,
     std::optional<xrpl::uint256> const& domain,
     PathServices& services,
-    xrpl::path::RippleCalc::Input const& rcInput)
+    xrpl::path::RippleCalc::Input const& rcInput,
+    xrpl::STPathSet const* displayPaths = nullptr)
 {
     PaidQuote q;
-    q.paths = paths;
+    q.paths = displayPaths ? *displayPaths : paths;
     if (!ledger)
         return q;
     try
@@ -139,6 +140,13 @@ keepIfBetter(PaidQuote& best, PaidQuote&& cand, bool convertAll)
         return;
     if (!best.ok || quoteBetter(cand.rc, best.rc, convertAll))
         best = std::move(cand);
+}
+
+xrpl::path::RippleCalc::Input
+withDefaultPaths(xrpl::path::RippleCalc::Input in, bool allow)
+{
+    in.defaultPathsAllowed = allow;
+    return in;
 }
 
 xrpl::STPathSet
@@ -172,28 +180,29 @@ bestPaidQuote(
     xrpl::path::RippleCalc::Input const& rcInput,
     bool convertAll)
 {
-    PaidQuote best = runPaidQuote(
-        ledger, saMax, dstAmount, dst, src, found, domain, services, rcInput);
+    // Price each explicit hop with RippleCalc. Do not Flow dest+bridge
+    // or the six together first (that "best" set spends send_max on the
+    // dest AMM). Do not allow default paths — that inserts the native
+    // asset even on a dest-only hop.
+    PaidQuote best;
     auto const dest = dstAmount.asset();
     auto const srcAsset = saMax.asset();
+    auto const destHop = directDestPath(dest);
+    auto const noDefault = withDefaultPaths(rcInput, false);
     if (srcAsset != dest)
     {
         xrpl::STPathSet oneHop;
-        pathSetPushAlways(oneHop, directDestPath(dest));
+        pathSetPushAlways(oneHop, destHop);
         keepIfBetter(
             best,
             runPaidQuote(
-                ledger, saMax, dstAmount, dst, src, oneHop, domain, services, rcInput),
+                ledger, saMax, dstAmount, dst, src, oneHop, domain, services, noDefault),
             convertAll);
     }
-    // IOU→IOU: the XRP book/AMM pair is often the best single route
-    // (RLUSD→XRP→XAH). Flow of six 2-hops can spend the send_max on
-    // worse mids first and quote below that bridge alone.
     if (!xrpl::isXRP(srcAsset) && !xrpl::isXRP(dest) && srcAsset != dest)
     {
-        auto const bridge = xrpBridgePath(dest);
         xrpl::STPathSet onlyBridge;
-        pathSetPushAlways(onlyBridge, bridge);
+        pathSetPushAlways(onlyBridge, xrpBridgePath(dest));
         keepIfBetter(
             best,
             runPaidQuote(
@@ -205,23 +214,7 @@ bestPaidQuote(
                 onlyBridge,
                 domain,
                 services,
-                rcInput),
-            convertAll);
-        xrpl::STPathSet destAndBridge;
-        pathSetPushAlways(destAndBridge, bridge);
-        pathSetPushAlways(destAndBridge, directDestPath(dest));
-        keepIfBetter(
-            best,
-            runPaidQuote(
-                ledger,
-                saMax,
-                dstAmount,
-                dst,
-                src,
-                destAndBridge,
-                domain,
-                services,
-                rcInput),
+                noDefault),
             convertAll);
     }
     for (auto const& p : found)
@@ -233,22 +226,9 @@ bestPaidQuote(
         keepIfBetter(
             best,
             runPaidQuote(
-                ledger, saMax, dstAmount, dst, src, one, domain, services, rcInput),
+                ledger, saMax, dstAmount, dst, src, one, domain, services, noDefault),
             convertAll);
     }
-    keepIfBetter(
-        best,
-        runPaidQuote(
-            ledger,
-            saMax,
-            dstAmount,
-            dst,
-            src,
-            xrpl::STPathSet{},
-            domain,
-            services,
-            rcInput),
-        convertAll);
     return best;
 }
 
@@ -662,6 +642,7 @@ PathSession::revalidatePaths(
     }();
 
     xrpl::path::RippleCalc::Input rcInput;
+    rcInput.defaultPathsAllowed = false;
     if (convertAll_)
         rcInput.partialPaymentAllowed = true;
 
@@ -936,6 +917,7 @@ PathSession::findPaths(
         }();
 
         xrpl::path::RippleCalc::Input rcInput;
+        rcInput.defaultPathsAllowed = false;
         if (convertAll_)
             rcInput.partialPaymentAllowed = true;
         auto const tCalc = std::chrono::steady_clock::now();
