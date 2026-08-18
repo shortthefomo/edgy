@@ -26,8 +26,9 @@ class LocalOrderBooks;
  * (Payment::kMaxPathSize). One-shot ripple_path_find uses a fixed
  * mid depth because it only gets one response.
  *
- * twoHop is how many scored 2-hop pairs to keep after ranking every
- * intersection — the walk itself is not truncated first.
+ * twoHop is how many scored 2-hop pairs to keep after ranking. On
+ * later WS explore waves the walk takes a rotated slice so each
+ * rediscovery is cheap and still finds new mids.
  */
 struct SearchBudget
 {
@@ -38,6 +39,9 @@ struct SearchBudget
     int branch{6};
     int rank{64};
     int autoSources{6};
+    // 0 = first full scan. Later waves rotate 2-hop / 3-hop / 4-hop
+    // / BFS windows instead of repeating the same walk.
+    int exploreWave{0};
 
     // Same as xrpl::Payment::kMaxPathLength / kMaxPathSize (private there).
     static constexpr int kMaxPathLength = 8;
@@ -45,7 +49,7 @@ struct SearchBudget
     static constexpr int kMaxDepth = 4;
 
     [[nodiscard]] static SearchBudget
-    forDepth(int depth);
+    forDepth(int depth, int exploreWave = 0);
 
     [[nodiscard]] static int
     depthFor(
@@ -78,9 +82,11 @@ struct FastPathResult
 /**
  * Book/AMM graph search. Scores every 1- and 2-hop pair (and a
  * bidirectional 3/4-hop meet) from composed tip/AMM quality and tip
- * size. 1–2 hop pairs stay in front of longer hops so speculative
- * 4-hop tips cannot hide the books xrpld returns. RippleCalc filters
- * the shortlist; only tesSUCCESS paths are returned.
+ * size. The direct dest hop and the XRP bridge (IOU→IOU) are always
+ * scored and kept in the Flow set even when isolate ranking already
+ * filled six 2-hops, and even when hasBook misses a live CLOB/AMM.
+ * RippleCalc filters the shortlist; session then keeps the better of
+ * found / each hop / dest / XRP-bridge / default-path actualAmountOut.
  */
 class FastPathFinder
 {

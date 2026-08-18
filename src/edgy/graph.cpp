@@ -404,10 +404,11 @@ hopsFromPath(xrpl::STPath const& path)
 }  // namespace
 
 SearchBudget
-SearchBudget::forDepth(int depth)
+SearchBudget::forDepth(int depth, int exploreWave)
 {
     SearchBudget b;
     b.depth = std::clamp(depth, 0, kMaxDepth);
+    b.exploreWave = std::max(0, exploreWave);
     switch (b.depth)
     {
         case 0:
@@ -451,6 +452,14 @@ SearchBudget::forDepth(int depth)
             b.rank = 12;
             b.autoSources = 18;
             break;
+    }
+    // Later WS waves open a bit more hop room and rotate cost into
+    // expand, not a second full 2-hop scan of every mid.
+    if (b.exploreWave > 0)
+    {
+        b.maxHops = std::max(b.maxHops, std::min(kMaxPathLength, 4 + (b.exploreWave % 3)));
+        b.expand = std::min(64, b.expand + 8 * (b.exploreWave % 4));
+        b.rank = std::min(16, b.rank + (b.exploreWave % 3));
     }
     b.maxHops = std::clamp(b.maxHops, 1, kMaxPathLength);
     return b;
@@ -557,52 +566,91 @@ FastPathFinder::search(
         }
     };
 
-    if (books.hasBook(srcAsset, dstAsset, domain))
+    // Always score the direct dest book / AMM and the XRP bridge.
+    // Do not require hasBook — token vs Issue adjacency can miss an
+    // edge that RippleCalc still pays (RLUSD→XRP, then XRP→XAH).
+    if (srcAsset != dstAsset && !xrpl::equalTokens(srcAsset, dstAsset))
+        consider({dstAsset});
+    else if (books.hasBook(srcAsset, dstAsset, domain))
         consider({dstAsset});
 
-    if (!srcIsXrp && !dstIsXrp && books.hasBook(srcAsset, xrp, domain) &&
-        books.hasBook(xrp, dstAsset, domain))
-    {
+    if (!srcIsXrp && !dstIsXrp && srcAsset != dstAsset)
         consider({xrp, dstAsset});
-    }
 
-    // Score every 2-hop meet; keep the best twoHop after sort.
-    for (auto const& mid : books.intermediates(srcAsset, dstAsset, domain))
+    // Score 2-hop meets. Wave 0 walks every mid; later waves take a
+    // rotated window so rediscovery stays cheap and still finds new hubs.
     {
-        if (continueCallback && !continueCallback())
-            break;
-        if (mid == srcAsset || mid == dstAsset || xrpl::equalTokens(mid, srcAsset) ||
-            xrpl::equalTokens(mid, dstAsset))
-            continue;
-        if (!srcIsXrp && !dstIsXrp && xrpl::isXRP(mid))
-            continue;
-        consider({mid, dstAsset});
-    }
-
-    if (maxHops >= 3 && !dstIsXrp && books.hasBook(xrp, dstAsset, domain))
-    {
-        for (auto const& mid : books.intermediates(srcAsset, xrp, domain))
+        std::vector<xrpl::Asset> mids;
+        for (auto const& mid : books.intermediates(srcAsset, dstAsset, domain))
+        {
+            if (mid == srcAsset || mid == dstAsset || xrpl::equalTokens(mid, srcAsset) ||
+                xrpl::equalTokens(mid, dstAsset))
+                continue;
+            if (!srcIsXrp && !dstIsXrp && xrpl::isXRP(mid))
+                continue;
+            mids.push_back(mid);
+        }
+        int const n = static_cast<int>(mids.size());
+        int start = 0;
+        int count = n;
+        if (budget.exploreWave > 0 && n > budget.twoHop)
+        {
+            start = (budget.exploreWave * std::max(1, budget.twoHop / 2)) % n;
+            count = budget.twoHop;
+        }
+        for (int i = 0; i < count; ++i)
         {
             if (continueCallback && !continueCallback())
                 break;
+            consider({mids[static_cast<std::size_t>((start + i) % n)], dstAsset});
+        }
+    }
+
+    auto walkMids = [&](std::vector<xrpl::Asset> mids, auto const& use) {
+        int const n = static_cast<int>(mids.size());
+        int start = 0;
+        int count = n;
+        if (budget.exploreWave > 0 && n > budget.twoHop)
+        {
+            start = ((budget.exploreWave + 1) * std::max(1, budget.twoHop / 2)) % n;
+            count = budget.twoHop;
+        }
+        for (int i = 0; i < count; ++i)
+        {
+            if (continueCallback && !continueCallback())
+                break;
+            use(mids[static_cast<std::size_t>((start + i) % n)]);
+        }
+    };
+
+    if (maxHops >= 3 && !dstIsXrp && books.hasBook(xrp, dstAsset, domain))
+    {
+        std::vector<xrpl::Asset> mids;
+        for (auto const& mid : books.intermediates(srcAsset, xrp, domain))
+        {
             if (xrpl::isXRP(mid) || xrpl::equalTokens(mid, srcAsset) ||
                 xrpl::equalTokens(mid, dstAsset))
                 continue;
-            consider({mid, xrp, dstAsset});
+            mids.push_back(mid);
         }
+        walkMids(std::move(mids), [&](xrpl::Asset const& mid) {
+            consider({mid, xrp, dstAsset});
+        });
     }
 
     if (maxHops >= 3 && !srcIsXrp && books.hasBook(srcAsset, xrp, domain))
     {
+        std::vector<xrpl::Asset> mids;
         for (auto const& mid : books.intermediates(xrp, dstAsset, domain))
         {
-            if (continueCallback && !continueCallback())
-                break;
             if (xrpl::isXRP(mid) || xrpl::equalTokens(mid, srcAsset) ||
                 xrpl::equalTokens(mid, dstAsset))
                 continue;
-            consider({xrp, mid, dstAsset});
+            mids.push_back(mid);
         }
+        walkMids(std::move(mids), [&](xrpl::Asset const& mid) {
+            consider({xrp, mid, dstAsset});
+        });
     }
 
     // 4-hop meet-in-the-middle: src→A→B  ∩  X→M→dst with B==X.
@@ -619,11 +667,16 @@ FastPathFinder::search(
         suffixes.reserve(static_cast<std::size_t>(budget.twoHop));
 
         int const legCap = std::max(budget.twoHop * 4, 32);
+        int const skipPref =
+            budget.exploreWave > 0 ? (budget.exploreWave * 8) % std::max(1, legCap) : 0;
         int nPref = 0;
+        int seenPref = 0;
         for (auto const& a : books.neighbors(srcAsset, domain))
         {
             if (continueCallback && !continueCallback())
                 break;
+            if (seenPref++ < skipPref)
+                continue;
             if (nPref >= legCap)
                 break;
             if (a == srcAsset || xrpl::equalTokens(a, srcAsset))
@@ -940,6 +993,61 @@ FastPathFinder::search(
     // the same 2-hop set xrpld Pathfinder returns.
     pick(true);
     pick(false);
+    // Flow must see dest and the XRP bridge even when isolate ranking
+    // filled six 2-hops. Evict a non-required tail slot — do not evict
+    // dest to make room for the bridge (or the other way around).
+    std::vector<xrpl::STPath> required;
+    if (srcAsset != dstAsset && !xrpl::equalTokens(srcAsset, dstAsset))
+        required.push_back(bookPath({dstAsset}));
+    if (!srcIsXrp && !dstIsXrp && srcAsset != dstAsset)
+        required.push_back(bookPath({xrp, dstAsset}));
+    auto hasKey = [](xrpl::STPathSet const& set, std::string const& key) {
+        for (auto const& p : set)
+        {
+            if (hopCurrencyKey(p) == key)
+                return true;
+        }
+        return false;
+    };
+    auto requiredKey = [&](std::string const& key) {
+        for (auto const& p : required)
+        {
+            if (hopCurrencyKey(p) == key)
+                return true;
+        }
+        return false;
+    };
+    for (auto const& path : required)
+    {
+        if (path.empty())
+            continue;
+        auto const key = hopCurrencyKey(path);
+        if (hasKey(result.paths, key))
+            continue;
+        if (static_cast<int>(result.paths.size()) >= SearchBudget::kMaxPathCount)
+        {
+            int drop = -1;
+            for (int i = static_cast<int>(result.paths.size()) - 1; i >= 0; --i)
+            {
+                if (!requiredKey(hopCurrencyKey(result.paths[static_cast<std::size_t>(i)])))
+                {
+                    drop = i;
+                    break;
+                }
+            }
+            if (drop < 0)
+                continue;
+            xrpl::STPathSet kept;
+            for (int i = 0; i < static_cast<int>(result.paths.size()); ++i)
+            {
+                if (i != drop)
+                    pathSetPushAlways(kept, result.paths[static_cast<std::size_t>(i)]);
+            }
+            result.paths = std::move(kept);
+        }
+        if (static_cast<int>(result.paths.size()) < SearchBudget::kMaxPathCount)
+            pathSetPushAlways(result.paths, path);
+    }
     for (auto const& r : ranks)
     {
         if (static_cast<int>(result.discovered.size()) >= budget.rank)

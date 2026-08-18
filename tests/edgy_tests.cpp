@@ -1062,6 +1062,13 @@ main()
                "oversize depth clamps to 8 hops");
         expect(SearchBudget::depthFor(false, 0, 0ms, 3, 1) == 1,
                "search-fast above search uses the search cap");
+        expect(SearchBudget::forDepth(0).maxHops == 2, "wave 0 keeps the shallow hop cap");
+        expect(SearchBudget::forDepth(0, 0).maxHops == SearchBudget::forDepth(0).maxHops,
+               "explicit wave 0 matches the one-arg budget");
+        expect(SearchBudget::forDepth(4, 2).maxHops == SearchBudget::kMaxPathLength,
+               "explore waves still clamp at 8 hops");
+        expect(SearchBudget::forDepth(0, 3).maxHops >= 4,
+               "later WS waves open more hop room without a full rescan");
     }
 
     {
@@ -1462,6 +1469,151 @@ main()
             SearchBudget::forDepth(0),
             {});
         expect(good.candidates > 0, "send_max keeps a hop inside the dest/send_max bound");
+    }
+
+    {
+        // Direct dest book stays in the Flow set even when many 2-hops exist.
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Asset const xrp{xrpl::xrpIssue()};
+        auto addDir = [&](xrpl::Issue const& in, xrpl::Asset const& out, int n) {
+            xrpl::uint256 key;
+            std::string hex(64, 'E');
+            hex[62] = "0123456789ABCDEF"[static_cast<unsigned>(n) % 16];
+            hex[63] = "0123456789ABCDEF"[static_cast<unsigned>(n / 16) % 16];
+            (void)key.parseHex(hex);
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            auto const outAmt = xrpl::STAmount{out, 1};
+            sle->setFieldU64(
+                xrpl::sfExchangeRate, xrpl::getRate(outAmt, xrpl::STAmount{in, 1}));
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, in.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, in.account);
+            if (xrpl::isXRP(out))
+            {
+                sle->setFieldH160(xrpl::sfTakerGetsCurrency, xrpl::xrpCurrency());
+                sle->setFieldH160(xrpl::sfTakerGetsIssuer, xrpl::xrpAccount());
+            }
+            else
+            {
+                auto const issue = out.get<xrpl::Issue>();
+                sle->setFieldH160(xrpl::sfTakerGetsCurrency, issue.currency);
+                sle->setFieldH160(xrpl::sfTakerGetsIssuer, issue.account);
+            }
+            services.books().addFromSle(sle);
+        };
+        addDir(usd, xrp, 1);
+        for (int i = 0; i < 8; ++i)
+        {
+            char code[4] = {'M', 'M', static_cast<char>('A' + i), 0};
+            xrpl::Issue mid{xrpl::toCurrency(code), gw};
+            addDir(usd, xrpl::Asset{mid}, 10 + i);
+            addDir(mid, xrp, 20 + i);
+        }
+        xrpl::STAmount const dstAmt{xrpl::xrpIssue(), 1'000'000};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(4),
+            {});
+        bool sawDirect = false;
+        for (auto const& path : found.paths)
+        {
+            if (path.size() == 1)
+                sawDirect = true;
+        }
+        expect(sawDirect, "direct dest book stays in the shortlist among 2-hops");
+        expect(found.candidates > 1, "2-hops are still scored alongside the dest hop");
+    }
+
+    {
+        // IOU→IOU always keeps the XRP bridge, even with no XRP books
+        // in the graph (hasBook miss) and six other 2-hops filling rank.
+        boost::asio::io_context io;
+        PathServices services(io);
+        LedgerBuilder b;
+        xrpl::LedgerHeader h;
+        h.seq = 1;
+        b.setHeader(h);
+        auto view = b.publish();
+        auto const src = testAccount("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        auto const dst = testAccount("rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe");
+        auto const gw = src;
+        xrpl::Issue usd{xrpl::toCurrency("USD"), gw};
+        xrpl::Issue eur{xrpl::toCurrency("EUR"), gw};
+        auto addDir = [&](xrpl::Issue const& in, xrpl::Issue const& out, int n) {
+            xrpl::uint256 key;
+            std::string hex(64, 'A');
+            hex[62] = "0123456789ABCDEF"[static_cast<unsigned>(n) % 16];
+            hex[63] = "0123456789ABCDEF"[static_cast<unsigned>(n / 16) % 16];
+            (void)key.parseHex(hex);
+            auto sle = std::make_shared<xrpl::SLE>(xrpl::ltDIR_NODE, key);
+            sle->setFieldH256(xrpl::sfRootIndex, key);
+            sle->setFieldU64(
+                xrpl::sfExchangeRate,
+                xrpl::getRate(xrpl::STAmount{out, 1}, xrpl::STAmount{in, 1}));
+            sle->setFieldH160(xrpl::sfTakerPaysCurrency, in.currency);
+            sle->setFieldH160(xrpl::sfTakerPaysIssuer, in.account);
+            sle->setFieldH160(xrpl::sfTakerGetsCurrency, out.currency);
+            sle->setFieldH160(xrpl::sfTakerGetsIssuer, out.account);
+            services.books().addFromSle(sle);
+        };
+        for (int i = 0; i < 8; ++i)
+        {
+            char code[4] = {'M', 'M', static_cast<char>('A' + i), 0};
+            xrpl::Issue mid{xrpl::toCurrency(code), gw};
+            addDir(usd, mid, 10 + i);
+            addDir(mid, eur, 20 + i);
+        }
+        expect(!services.books().hasBook(usd, xrpl::xrpIssue()),
+               "fixture has no USD→XRP book");
+        expect(!services.books().hasBook(xrpl::xrpIssue(), eur),
+               "fixture has no XRP→EUR book");
+        xrpl::STAmount const dstAmt{eur, 100};
+        auto found = FastPathFinder::search(
+            services.books(),
+            services,
+            view,
+            src,
+            dst,
+            usd,
+            dstAmt,
+            std::nullopt,
+            std::nullopt,
+            xrpl::STPathSet{},
+            false,
+            SearchBudget::forDepth(0),
+            {});
+        bool sawDirect = false;
+        bool sawXrpBridge = false;
+        for (auto const& path : found.paths)
+        {
+            if (path.size() == 1)
+                sawDirect = true;
+            if (path.size() == 2 && xrpl::isXRP(pathElementAsset(path[0])) &&
+                pathElementAsset(path[1]) == xrpl::Asset{eur})
+                sawXrpBridge = true;
+        }
+        expect(sawDirect, "IOU→IOU still keeps the dest hop");
+        expect(sawXrpBridge, "IOU→IOU keeps the XRP bridge without hasBook");
     }
 
     {

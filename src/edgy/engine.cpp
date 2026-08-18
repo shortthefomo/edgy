@@ -1282,7 +1282,7 @@ Engine::notifySubscriptions(bool revalidateOnly)
     if (auto const view = cache->getLedger())
         ledgerSeq = view->seq();
 
-    int deepenLeft = 4;
+    int deepenLeft = 6;
     for (auto const& sub : live)
     {
         if (!sub.session->tryBeginUpdate())

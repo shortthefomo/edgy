@@ -61,6 +61,197 @@ cappedPaths(xrpl::STPathSet const& paths)
     return out;
 }
 
+xrpl::STPath
+directDestPath(xrpl::Asset const& dstAsset)
+{
+    xrpl::STPath path;
+    pathPush(path, bookPathElement(dstAsset));
+    return path;
+}
+
+xrpl::STPath
+xrpBridgePath(xrpl::Asset const& dstAsset)
+{
+    xrpl::STPath path;
+    pathPush(path, bookPathElement(xrpl::xrpIssue()));
+    pathPush(path, bookPathElement(dstAsset));
+    return path;
+}
+
+bool
+quoteBetter(
+    xrpl::path::RippleCalc::Output const& a,
+    xrpl::path::RippleCalc::Output const& b,
+    bool convertAll)
+{
+    if (a.result() != xrpl::tesSUCCESS)
+        return false;
+    if (b.result() != xrpl::tesSUCCESS)
+        return true;
+    if (convertAll)
+        return a.actualAmountOut > b.actualAmountOut;
+    if (a.actualAmountIn != b.actualAmountIn)
+        return a.actualAmountIn < b.actualAmountIn;
+    return a.actualAmountOut > b.actualAmountOut;
+}
+
+struct PaidQuote
+{
+    xrpl::path::RippleCalc::Output rc;
+    xrpl::STPathSet paths;
+    bool ok{false};
+};
+
+PaidQuote
+runPaidQuote(
+    std::shared_ptr<xrpl::ReadView const> const& ledger,
+    xrpl::STAmount const& saMax,
+    xrpl::STAmount const& dstAmount,
+    xrpl::AccountID const& dst,
+    xrpl::AccountID const& src,
+    xrpl::STPathSet const& paths,
+    std::optional<xrpl::uint256> const& domain,
+    PathServices& services,
+    xrpl::path::RippleCalc::Input const& rcInput)
+{
+    PaidQuote q;
+    q.paths = paths;
+    if (!ledger)
+        return q;
+    try
+    {
+        xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
+        q.rc = rippleCalculate(
+            sandbox, saMax, dstAmount, dst, src, paths, domain, services, &rcInput);
+        q.ok = q.rc.result() == xrpl::tesSUCCESS;
+    }
+    catch (...)
+    {
+        q.ok = false;
+    }
+    return q;
+}
+
+void
+keepIfBetter(PaidQuote& best, PaidQuote&& cand, bool convertAll)
+{
+    if (!cand.ok)
+        return;
+    if (!best.ok || quoteBetter(cand.rc, best.rc, convertAll))
+        best = std::move(cand);
+}
+
+xrpl::STPathSet
+mergePaths(xrpl::STPathSet const& first, xrpl::STPathSet const& rest)
+{
+    xrpl::STPathSet out;
+    auto add = [&](xrpl::STPath const& p) {
+        if (p.empty())
+            return;
+        if (static_cast<int>(out.size()) >= SearchBudget::kMaxPathCount)
+            return;
+        pathSetPush(out, p);
+    };
+    for (auto const& p : first)
+        add(p);
+    for (auto const& p : rest)
+        add(p);
+    return out;
+}
+
+PaidQuote
+bestPaidQuote(
+    std::shared_ptr<xrpl::ReadView const> const& ledger,
+    xrpl::STAmount const& saMax,
+    xrpl::STAmount const& dstAmount,
+    xrpl::AccountID const& dst,
+    xrpl::AccountID const& src,
+    xrpl::STPathSet const& found,
+    std::optional<xrpl::uint256> const& domain,
+    PathServices& services,
+    xrpl::path::RippleCalc::Input const& rcInput,
+    bool convertAll)
+{
+    PaidQuote best = runPaidQuote(
+        ledger, saMax, dstAmount, dst, src, found, domain, services, rcInput);
+    auto const dest = dstAmount.asset();
+    auto const srcAsset = saMax.asset();
+    if (srcAsset != dest)
+    {
+        xrpl::STPathSet oneHop;
+        pathSetPushAlways(oneHop, directDestPath(dest));
+        keepIfBetter(
+            best,
+            runPaidQuote(
+                ledger, saMax, dstAmount, dst, src, oneHop, domain, services, rcInput),
+            convertAll);
+    }
+    // IOU→IOU: the XRP book/AMM pair is often the best single route
+    // (RLUSD→XRP→XAH). Flow of six 2-hops can spend the send_max on
+    // worse mids first and quote below that bridge alone.
+    if (!xrpl::isXRP(srcAsset) && !xrpl::isXRP(dest) && srcAsset != dest)
+    {
+        auto const bridge = xrpBridgePath(dest);
+        xrpl::STPathSet onlyBridge;
+        pathSetPushAlways(onlyBridge, bridge);
+        keepIfBetter(
+            best,
+            runPaidQuote(
+                ledger,
+                saMax,
+                dstAmount,
+                dst,
+                src,
+                onlyBridge,
+                domain,
+                services,
+                rcInput),
+            convertAll);
+        xrpl::STPathSet destAndBridge;
+        pathSetPushAlways(destAndBridge, bridge);
+        pathSetPushAlways(destAndBridge, directDestPath(dest));
+        keepIfBetter(
+            best,
+            runPaidQuote(
+                ledger,
+                saMax,
+                dstAmount,
+                dst,
+                src,
+                destAndBridge,
+                domain,
+                services,
+                rcInput),
+            convertAll);
+    }
+    for (auto const& p : found)
+    {
+        if (p.empty())
+            continue;
+        xrpl::STPathSet one;
+        pathSetPushAlways(one, p);
+        keepIfBetter(
+            best,
+            runPaidQuote(
+                ledger, saMax, dstAmount, dst, src, one, domain, services, rcInput),
+            convertAll);
+    }
+    keepIfBetter(
+        best,
+        runPaidQuote(
+            ledger,
+            saMax,
+            dstAmount,
+            dst,
+            src,
+            xrpl::STPathSet{},
+            domain,
+            services,
+            rcInput),
+        convertAll);
+    return best;
+}
+
 void
 setClosedLedgerIdentity(json::Value& dest, std::shared_ptr<xrpl::ReadView const> const& view)
 {
@@ -471,45 +662,37 @@ PathSession::revalidatePaths(
     }();
 
     xrpl::path::RippleCalc::Input rcInput;
-    rcInput.defaultPathsAllowed = false;
     if (convertAll_)
         rcInput.partialPaymentAllowed = true;
 
     auto const ledger = calcLedger ? calcLedger : cache->getLedger();
-    xrpl::path::RippleCalc::Output rc;
-    try
-    {
-        xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-        rc = rippleCalculate(
-            sandbox,
-            saMaxAmount,
-            dstAmount,
-            *dst_,
-            *src_,
-            paths,
-            domain_,
-            registry_,
-            &rcInput);
-    }
-    catch (std::exception const& ex)
-    {
-        JLOG(journal_.warn()) << "revalidate RippleCalc: " << ex.what();
+    auto best = bestPaidQuote(
+        ledger,
+        saMaxAmount,
+        dstAmount,
+        *dst_,
+        *src_,
+        paths,
+        domain_,
+        registry_,
+        rcInput,
+        convertAll_);
+    if (!best.ok)
         return false;
-    }
 
-    if (rc.result() != xrpl::tesSUCCESS)
-        return false;
+    // Keep the better quote; still show the rest of the hop list.
+    context_[asset] = cappedPaths(mergePaths(best.paths, paths));
 
     json::Value jvEntry(kJsonObject);
-    forceIssueAccount(rc.actualAmountIn, sourceAccount);
+    forceIssueAccount(best.rc.actualAmountIn, sourceAccount);
     jvEntry[xrpl::jss::source_amount] =
-        rc.actualAmountIn.getJson(kJsonNone);
+        best.rc.actualAmountIn.getJson(kJsonNone);
     jvEntry[xrpl::jss::paths_computed] =
-        cappedPaths(paths).getJson(kJsonNone);
+        context_[asset].getJson(kJsonNone);
     if (convertAll_)
     {
         jvEntry[xrpl::jss::destination_amount] =
-            rc.actualAmountOut.getJson(kJsonNone);
+            best.rc.actualAmountOut.getJson(kJsonNone);
     }
     if (oneShot_)
         jvEntry[xrpl::jss::paths_canonical] = kJsonArray;
@@ -540,7 +723,8 @@ PathSession::findPaths(
         auto const budget = SearchBudget::forDepth(
             forceFast ? cfg_.searchFast
                       : SearchBudget::depthFor(
-                            oneShot_, searchesDone_, age, cfg_.searchFast, cfg_.search));
+                            oneShot_, searchesDone_, age, cfg_.searchFast, cfg_.search),
+            oneShot_ ? 0 : exploreWave_);
         // Auto source set grows with subscription age. Explicit
         // source_currencies still honours kMaxSrcCur.
         auto const hardMax = static_cast<std::size_t>(
@@ -641,7 +825,8 @@ PathSession::findPaths(
     auto const budget = SearchBudget::forDepth(
         forceFast ? cfg_.searchFast
                   : SearchBudget::depthFor(
-                        oneShot_, searchesDone_, age, cfg_.searchFast, cfg_.search));
+                        oneShot_, searchesDone_, age, cfg_.searchFast, cfg_.search),
+        oneShot_ ? 0 : exploreWave_);
     lastDepth_.store(budget.depth, std::memory_order_release);
     auto timedContinue = continueCallback;
     if (cfg_.searchTimeout.count() > 0)
@@ -676,6 +861,12 @@ PathSession::findPaths(
         if (timedContinue && !timedContinue())
             break;
 
+        xrpl::STPathSet extra = context_[asset];
+        if (auto pit = explorePool_.find(asset); pit != explorePool_.end())
+        {
+            for (auto const& p : pit->second)
+                pathSetPush(extra, p);
+        }
         auto const found = FastPathFinder::search(
             books,
             registry_,
@@ -686,10 +877,28 @@ PathSession::findPaths(
             dstAmount,
             sendMax_,
             domain_,
-            context_[asset],
+            extra,
             convertAll_,
             budget,
             timedContinue);
+        auto remember = [&](xrpl::STPath const& p) {
+            if (p.empty())
+                return;
+            auto& pool = explorePool_[asset];
+            for (auto const& e : pool)
+            {
+                if (e == p)
+                    return;
+            }
+            pool.push_front(p);
+            constexpr std::size_t kExplorePoolCap = 24;
+            if (pool.size() > kExplorePoolCap)
+                pool.pop_back();
+        };
+        for (auto const& p : found.paths)
+            remember(p);
+        for (auto const& p : found.discovered)
+            remember(p);
         auto ps = cappedPaths(found.paths);
         context_[asset] = ps;
 
@@ -732,46 +941,46 @@ PathSession::findPaths(
         auto const tCalc = std::chrono::steady_clock::now();
         try
         {
-            xrpl::PaymentSandbox sandbox(&*ledger, xrpl::TapNone);
-            auto rc = rippleCalculate(
-                sandbox, saMaxAmount, dstAmount, *dst_, *src_, ps, domain_, registry_, &rcInput);
-            // A junk hop list used to fail the whole set (alts=0) even when
-            // the default path or a subset would have paid. Retry default
-            // only; the finder already dropped paths that failed isolate.
-            if (rc.result() != xrpl::tesSUCCESS && !ps.empty())
-            {
-                xrpl::PaymentSandbox defBox(&*ledger, xrpl::TapNone);
-                auto def = rippleCalculate(
-                    defBox,
-                    saMaxAmount,
-                    dstAmount,
-                    *dst_,
-                    *src_,
-                    xrpl::STPathSet{},
-                    domain_,
-                    registry_,
-                    &rcInput);
-                if (def.result() == xrpl::tesSUCCESS)
-                {
-                    rc = def;
-                    ps = xrpl::STPathSet{};
-                    context_[asset] = ps;
-                }
-            }
+            // Always price the found set, dest hop, XRP bridge, each hop
+            // alone, and the default path. Keep the better actualAmountOut
+            // (convert-all) or cheaper actualAmountIn (fixed dest). Flow of
+            // six 2-hops used to hide a better RLUSD→XRP→XAH book/AMM.
+            auto best = bestPaidQuote(
+                ledger,
+                saMaxAmount,
+                dstAmount,
+                *dst_,
+                *src_,
+                ps,
+                domain_,
+                registry_,
+                rcInput,
+                convertAll_);
             auto const calcMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tCalc);
 
-            if (rc.result() == xrpl::tesSUCCESS)
+            if (best.ok)
             {
+                ps = cappedPaths(mergePaths(best.paths, found.paths));
+                if (static_cast<int>(ps.size()) < SearchBudget::kMaxPathCount)
+                    ps = cappedPaths(mergePaths(ps, found.discovered));
+                if (auto pit = explorePool_.find(asset); pit != explorePool_.end())
+                {
+                    xrpl::STPathSet pooled;
+                    for (auto const& p : pit->second)
+                        pathSetPush(pooled, p);
+                    ps = cappedPaths(mergePaths(ps, pooled));
+                }
+                context_[asset] = ps;
                 json::Value jvEntry(kJsonObject);
-                forceIssueAccount(rc.actualAmountIn, sourceAccount);
+                forceIssueAccount(best.rc.actualAmountIn, sourceAccount);
                 jvEntry[xrpl::jss::source_amount] =
-                    rc.actualAmountIn.getJson(kJsonNone);
+                    best.rc.actualAmountIn.getJson(kJsonNone);
                 jvEntry[xrpl::jss::paths_computed] = ps.getJson(kJsonNone);
                 if (convertAll_)
                 {
                     jvEntry[xrpl::jss::destination_amount] =
-                        rc.actualAmountOut.getJson(kJsonNone);
+                        best.rc.actualAmountOut.getJson(kJsonNone);
                 }
                 if (oneShot_)
                     jvEntry[xrpl::jss::paths_canonical] = kJsonArray;
@@ -783,7 +992,7 @@ PathSession::findPaths(
                     withPaths.push_back(std::move(jvEntry));
             }
             JLOG(journal_.info()) << "fast path_find final calc " << calcMs.count()
-                                  << "ms result=" << rc.result();
+                                  << "ms ok=" << best.ok;
         }
         catch (std::exception const& ex)
         {
@@ -915,6 +1124,8 @@ PathSession::doUpdate(
         {
             lastFullSearchIndex_ = ledgerSeq;
             lastLineEpoch_ = cache->lineEpoch();
+            if (!oneShot_)
+                ++exploreWave_;
         }
         newStatus[xrpl::jss::alternatives] = std::move(jvArray);
     }
@@ -925,6 +1136,8 @@ PathSession::doUpdate(
         {
             lastFullSearchIndex_ = ledgerSeq;
             lastLineEpoch_ = cache->lineEpoch();
+            if (!oneShot_)
+                ++exploreWave_;
         }
         newStatus = xrpl::rpcError(xrpl::RpcInternal);
     }

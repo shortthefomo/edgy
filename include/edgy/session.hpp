@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -180,6 +181,9 @@ private:
     std::optional<xrpl::STAmount> sendMax_;
     std::set<xrpl::Asset> sourceAssets_;
     std::map<xrpl::Asset, xrpl::STPathSet> context_;
+    // Longer-lived hop pool for WS sockets. Each rediscovery adds new
+    // finds; old hops stay so later Flow sets can beat the current six.
+    std::map<xrpl::Asset, std::deque<xrpl::STPath>> explorePool_;
     std::optional<xrpl::uint256> domain_;
     bool convertAll_{false};
     bool sourceCurrenciesTruncated_{false};
@@ -192,6 +196,7 @@ private:
 
     std::chrono::steady_clock::time_point createdAt_{std::chrono::steady_clock::now()};
     int searchesDone_{0};
+    int exploreWave_{0};
     std::atomic<int> lastDepth_{0};
 };
 
