@@ -9,9 +9,6 @@
 #include <edgy/services.hpp>
 
 #include <xrpld/rpc/detail/AccountAssets.h>
-#ifndef EDGY_XAHAU
-#include <xrpld/rpc/detail/Pathfinder.h>
-#endif
 #include <xrpld/rpc/detail/PathfinderUtils.h>
 #include <xrpld/rpc/detail/Tuning.h>
 
@@ -32,9 +29,6 @@
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/jss.h>
-#ifndef EDGY_XAHAU
-#include <xrpl/server/LoadFeeTrack.h>
-#endif
 #include <xrpl/tx/paths/RippleCalc.h>
 
 #include <algorithm>
@@ -163,9 +157,7 @@ struct PaidQuote
     xrpl::path::RippleCalc::Output rc;
     xrpl::STPathSet paths;
     bool ok{false};
-#ifndef EDGY_XAHAU
     bool clobWalkFault{false};
-#endif
 };
 
 PaidQuote
@@ -320,14 +312,11 @@ bestPaidQuote(
     return isolated;
 }
 
-// Convert-all: dest AMM opens better than dest+XRP CLOB, so a combined
-// Flow with dest in the set spends send_max on dest AMM (~8550). dest+XRP
-// alone is one strand, so AMM uses maxOffer and gulps the XRP/XAH pool
-// (~8710) instead of the CLOB (~8760). Quote dest+XRP with the other
-// found hops but without the dest book — multiPath fibs AMM then takes
-// CLOB, and dest AMM cannot steal the input. Publish dest-out from the
-// best of those; paths_computed still lists Pathfinder's six (winner
-// first).
+// Convert-all dest: walk the dest CLOB and the dest+XRP CLOB. Combined
+// Flow spends send_max on dest AMM (~8550); dest+XRP RippleCalc gulps
+// the native AMM (~8710). The funded CLOB is ~8760 and is cheap to walk.
+// Flow only if both walks miss (AMM-only books). paths_computed is the
+// FastPathFinder six with the winning dest path first.
 PaidQuote
 quoteConvertAll(
     std::shared_ptr<xrpl::ReadView const> const& ledger,
@@ -361,52 +350,63 @@ quoteConvertAll(
     auto quote = [&](xrpl::STPathSet const& paths, bool allowDefault) {
         quoteAmt(paths, allowDefault, dstAmount);
     };
-    if (!found.empty())
-    {
-        quote(found, true);
-        quote(found, false);
-    }
     if (saMax.asset() == dstAmount.asset())
+    {
+        if (!found.empty())
+            quote(found, true);
         return best;
+    }
 
     auto const destAsset = dstAmount.asset();
-    xrpl::STPathSet destOnly;
-    pathSetPushAlways(destOnly, directDestPath(destAsset));
-    quote(destOnly, false);
-
-    if (xrpl::isXRP(saMax.asset()) || xrpl::isXRP(destAsset))
-        return best;
-
-    // dest+XRP alone is still the floor (~AMM fill). A no-dest multi-path
-    // set is tried in case Flow then fibs into the native/dest CLOB.
-    xrpl::STPathSet bridgeOnly;
-    pathSetPushAlways(bridgeOnly, xrpBridgePath(destAsset));
-    quote(bridgeOnly, false);
-#ifndef EDGY_XAHAU
+    // CLOB first. Convert-all RippleCalc walks the whole dest book and
+    // was 16s+ on every WS revalidate of deep pairs (RLUSD/XAH). Dest
+    // AMM is the worse fill on those books; skip Flow when a CLOB hit.
     if (ledger)
     {
-        auto walk = nativeBridgeClobOut(*ledger, saMax, destAsset);
-        if (walk.ok())
-        {
-            PaidQuote clob;
-            clob.ok = true;
-            pathSetPushAlways(clob.paths, xrpBridgePath(destAsset));
-            clob.rc.setResult(xrpl::tesSUCCESS);
-            clob.rc.actualAmountIn = saMax;
-            clob.rc.actualAmountOut = *walk.out;
-            keepIfBetter(best, std::move(clob), true);
-        }
-        else if (clobWalkIsFault(walk))
-        {
+        auto takeClob = [&](ClobWalkResult const& walk, xrpl::STPath const& path) {
+            if (walk.ok())
+            {
+                PaidQuote clob;
+                clob.ok = true;
+                pathSetPushAlways(clob.paths, path);
+                clob.rc.setResult(xrpl::tesSUCCESS);
+                clob.rc.actualAmountIn = saMax;
+                clob.rc.actualAmountOut = *walk.out;
+                keepIfBetter(best, std::move(clob), true);
+                return;
+            }
+            if (!clobWalkIsFault(walk))
+                return;
             best.clobWalkFault = true;
             std::cerr << "invariant clob_walk " << clobWalkWhyText(walk.why)
                       << " dirs=" << walk.dirs << " offers=" << walk.offers
                       << " taken=" << walk.taken
                       << " unfunded=" << walk.skippedUnfunded
                       << " skipped=" << walk.skippedOther << '\n';
+        };
+        takeClob(
+            clobBookTake(*ledger, makeBook(saMax.asset(), destAsset), saMax),
+            directDestPath(destAsset));
+        if (!xrpl::isXRP(saMax.asset()) && !xrpl::isXRP(destAsset))
+        {
+            takeClob(
+                nativeBridgeClobOut(*ledger, saMax, destAsset),
+                xrpBridgePath(destAsset));
         }
     }
-#endif
+    if (best.ok)
+        return best;
+
+    if (!found.empty())
+        quote(found, true);
+    xrpl::STPathSet destOnly;
+    pathSetPushAlways(destOnly, directDestPath(destAsset));
+    quote(destOnly, false);
+    if (xrpl::isXRP(saMax.asset()) || xrpl::isXRP(destAsset))
+        return best;
+    xrpl::STPathSet bridgeOnly;
+    pathSetPushAlways(bridgeOnly, xrpBridgePath(destAsset));
+    quote(bridgeOnly, false);
     return best;
 }
 
@@ -847,9 +847,7 @@ PathSession::revalidatePaths(
             domain_,
             registry_,
             rcInput);
-#ifndef EDGY_XAHAU
         clobWalkFault_ = best.clobWalkFault;
-#endif
         if (best.ok)
             context_[asset] = cappedPaths(mergePaths(best.paths, paths));
     }
@@ -1013,66 +1011,25 @@ PathSession::findPaths(
                 pathSetPush(extra, p);
         }
 
-        // Convert-all (send_max + dest -1) matches xrpld PathRequest:
-        // Pathfinder for the six, one rippleCalculate with default
-        // paths on. FastPathFinder + isolate-rank + "always republish
-        // combined" was 8s+ and quoted 8379 XAH for the same hops the
-        // node paid at 8755.
-        FastPathResult found;
-        xrpl::STPathSet chosen;
-        bool usedFast = false;
-#ifndef EDGY_XAHAU
-        if (convertAll_ && sendMax_ && sendMax_->signum() > 0)
-        {
-            try
-            {
-                (void)cache->getRippleLines(*src_);
-                (void)cache->getRippleLines(*dst_);
-                xrpl::Pathfinder pf(
-                    cache,
-                    *src_,
-                    *dst_,
-                    xrpl::PathAsset(asset),
-                    std::nullopt,
-                    dstAmount,
-                    sendMax_,
-                    domain_,
-                    registry_);
-                if (pf.findPaths(7, timedContinue))
-                {
-                    pf.computePathRanks(SearchBudget::kMaxPathCount, timedContinue);
-                    chosen = pf.getBestPaths(
-                        SearchBudget::kMaxPathCount,
-                        extra,
-                        asset.getIssuer(),
-                        timedContinue);
-                }
-            }
-            catch (std::exception const& ex)
-            {
-                JLOG(journal_.warn()) << "Pathfinder convert-all: " << ex.what();
-            }
-        }
-#endif
-        if (chosen.empty())
-        {
-            found = FastPathFinder::search(
-                books,
-                registry_,
-                ledger,
-                *src_,
-                *dst_,
-                asset,
-                dstAmount,
-                sendMax_,
-                domain_,
-                extra,
-                convertAll_,
-                budget,
-                timedContinue);
-            usedFast = true;
-            chosen = found.paths;
-        }
+        // Convert-all dest is CLOB-walked in quoteConvertAll. Do not run
+        // Pathfinder(7) + rank-every-complete-path here — that RippleCalc'd
+        // up to 1000 full send_max fills and made WS revalidate 16s+.
+        FastPathResult found = FastPathFinder::search(
+            books,
+            registry_,
+            ledger,
+            *src_,
+            *dst_,
+            asset,
+            dstAmount,
+            sendMax_,
+            domain_,
+            extra,
+            convertAll_,
+            budget,
+            timedContinue);
+        bool const usedFast = true;
+        xrpl::STPathSet chosen = found.paths;
         auto remember = [&](xrpl::STPath const& p) {
             if (p.empty())
                 return;
@@ -1156,9 +1113,7 @@ PathSession::findPaths(
                     domain_,
                     registry_,
                     rcInput);
-#ifndef EDGY_XAHAU
                 clobWalkFault_ = best.clobWalkFault;
-#endif
                 if (best.ok)
                     ps = cappedPaths(mergePaths(best.paths, ps));
             }
@@ -1394,10 +1349,8 @@ PathSession::doUpdate(
         setPathFindNotice(newStatus, WarnPathLinesBudget);
     else if (cache->hasIncompleteLinesForSession(id_))
         setPathFindNotice(newStatus, WarnPathLinesPartial);
-#ifndef EDGY_XAHAU
     else if (clobWalkFault_)
         setPathFindNotice(newStatus, WarnPathClobWalk);
-#endif
 
     {
         std::lock_guard const sl(lock_);

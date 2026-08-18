@@ -9,10 +9,12 @@
 #include <xrpl/protocol/Quality.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/STPathSet.h>
-#ifndef EDGY_XAHAU
 #include <xrpl/beast/utility/Journal.h>
-#include <xrpl/ledger/helpers/TokenHelpers.h>
 #include <xrpl/protocol/SField.h>
+#ifdef EDGY_XAHAU
+#include <xrpld/ledger/View.h>
+#else
+#include <xrpl/ledger/helpers/TokenHelpers.h>
 #endif
 
 #include <cmath>
@@ -110,7 +112,65 @@ pathElementAsset(xrpl::STPathElement const& el)
 #endif
 }
 
-#ifndef EDGY_XAHAU
+#ifdef EDGY_XAHAU
+inline xrpl::STAmount
+offerOwnerFunds(
+    xrpl::ReadView const& view,
+    xrpl::AccountID const& owner,
+    xrpl::STAmount const& gets,
+    beast::Journal j)
+{
+    return xrpl::accountFunds(view, owner, gets, xrpl::fhZERO_IF_FROZEN, j);
+}
+
+inline xrpl::Amounts
+limitOfferOut(
+    xrpl::Quality const& q,
+    xrpl::Amounts const& ofr,
+    xrpl::STAmount const& funds)
+{
+    return q.ceil_out_strict(ofr, funds, false);
+}
+
+inline xrpl::Amounts
+limitOfferIn(
+    xrpl::Quality const& q,
+    xrpl::Amounts const& ofr,
+    xrpl::STAmount const& left)
+{
+    return q.ceil_in_strict(ofr, left, false);
+}
+#else
+inline xrpl::STAmount
+offerOwnerFunds(
+    xrpl::ReadView const& view,
+    xrpl::AccountID const& owner,
+    xrpl::STAmount const& gets,
+    beast::Journal j)
+{
+    return xrpl::accountFunds(
+        view, owner, gets, xrpl::FreezeHandling::ZeroIfFrozen, j);
+}
+
+inline xrpl::Amounts
+limitOfferOut(
+    xrpl::Quality const& q,
+    xrpl::Amounts const& ofr,
+    xrpl::STAmount const& funds)
+{
+    return q.ceilOutStrict(ofr, funds, false);
+}
+
+inline xrpl::Amounts
+limitOfferIn(
+    xrpl::Quality const& q,
+    xrpl::Amounts const& ofr,
+    xrpl::STAmount const& left)
+{
+    return q.ceilInStrict(ofr, left, false);
+}
+#endif
+
 // Why a CLOB walk produced no output. EmptyBook with dirs/offers > 0 or
 // Threw is an invariant miss — the previous OfferStream walker swallowed
 // leftover-dust exceptions as a silent nullopt.
@@ -224,18 +284,20 @@ clobBookTake(
                 }
                 auto pays = off->getFieldAmount(xrpl::sfTakerPays);
                 auto gets = off->getFieldAmount(xrpl::sfTakerGets);
+#ifdef EDGY_XAHAU
+                if (!pays.holds<xrpl::Issue>() || !gets.holds<xrpl::Issue>() ||
+                    pays.get<xrpl::Issue>() != book.in ||
+                    gets.get<xrpl::Issue>() != book.out ||
+#else
                 if (pays.asset() != book.in || gets.asset() != book.out ||
+#endif
                     pays <= beast::kZero || gets <= beast::kZero)
                 {
                     ++r.skippedOther;
                     continue;
                 }
-                auto const funds = xrpl::accountFunds(
-                    view,
-                    off->getAccountID(xrpl::sfAccount),
-                    gets,
-                    xrpl::FreezeHandling::ZeroIfFrozen,
-                    j);
+                auto const funds = offerOwnerFunds(
+                    view, off->getAccountID(xrpl::sfAccount), gets, j);
                 if (funds <= beast::kZero)
                 {
                     ++r.skippedUnfunded;
@@ -243,14 +305,14 @@ clobBookTake(
                 }
                 xrpl::Amounts ofr{pays, gets};
                 if (funds < ofr.out)
-                    ofr = q.ceilOutStrict(ofr, funds, false);
+                    ofr = limitOfferOut(q, ofr, funds);
                 if (ofr.empty())
                 {
                     ++r.skippedOther;
                     continue;
                 }
                 if (ofr.in > left)
-                    ofr = q.ceilInStrict(ofr, left, false);
+                    ofr = limitOfferIn(q, ofr, left);
                 if (ofr.empty() || ofr.in > left || ofr.in <= beast::kZero)
                 {
                     ++r.skippedOther;
@@ -305,6 +367,5 @@ nativeBridgeClobOut(
     second.skippedOther += first.skippedOther;
     return second;
 }
-#endif
 
 }  // namespace edgy

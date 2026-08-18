@@ -917,8 +917,11 @@ FastPathFinder::search(
 
     auto const tRank = std::chrono::steady_clock::now();
     auto const saMax = srcMaxAmount(srcAsset, src, sendMax);
+    // Convert-all dest is priced later by quoteConvertAll (CLOB). Isolate
+    // only needs "does this hop work + tip quality" — a 1-unit dest, not
+    // largestAmount + full send_max (that walks the whole book per hop).
     auto const saMinDst = convertAll
-        ? xrpl::largestAmount(dstAmount)
+        ? xrpl::STAmount{dstAsset, 1}
         : [&] {
               auto const slots = std::max(1, xrpl::rpc::tuning::kPathFindMaxPaths + 2);
               return divide(dstAmount, xrpl::STAmount(slots), dstAmount.asset());
@@ -975,12 +978,8 @@ FastPathFinder::search(
         if (path.size() > SearchBudget::kMaxPathLength)
             continue;
         bool const longHop = cand.bookHops > 2;
-        // Convert-all with send_max must isolate more unique hubs so
-        // incremental Flow can prefer USD.GateHub over a fat PROFIT tip.
-        int const isolateNeed =
-            (convertAll && sendIn > 0) ? 16 : need;
-        int const isolateAttempts =
-            (convertAll && sendIn > 0) ? std::max(budget.rank, 24) : budget.rank;
+        int const isolateNeed = need;
+        int const isolateAttempts = budget.rank;
         // Have enough working 2-hops and already priced `rank` of them:
         // do not spend calcs on longer speculative hops.
         if (successes >= isolateNeed && (longHop || attempts >= isolateAttempts))
