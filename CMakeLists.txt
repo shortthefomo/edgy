@@ -8,7 +8,7 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-project(edgy VERSION 0.2.0 LANGUAGES CXX)
+project(edgy VERSION 0.2.1 LANGUAGES CXX)
 
 set(EDGY_GIT_HASH "")
 find_package(Git QUIET)
