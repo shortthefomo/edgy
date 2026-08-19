@@ -28,10 +28,12 @@ struct Config
 
     std::chrono::milliseconds midCloseDelay{100};
 
-    // FastPathFinder depth 0–4. "full" in .cfg is 4 (8-hop scan).
+    // FastPathFinder: fast = dest/2-hop, mid = 4-hop, full = 8-hop.
+    static constexpr int kSearchFast = 0;
+    static constexpr int kSearchMid = 2;
     static constexpr int kSearchFull = 4;
     int search{kSearchFull};
-    int searchFast{kSearchFull};
+    int searchFast{kSearchFast};
     std::chrono::milliseconds searchTimeout{0};
 
     std::size_t maxTotalLines{1'000'000};
@@ -73,6 +75,16 @@ struct Config
     nodeSoftware() const
     {
         return xahau() ? "xahaud" : "xrpld";
+    }
+
+    [[nodiscard]] static char const*
+    searchLevelName(int depth)
+    {
+        if (depth >= kSearchFull)
+            return "full";
+        if (depth >= kSearchMid)
+            return "mid";
+        return "fast";
     }
 
     static Config

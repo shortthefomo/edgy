@@ -290,7 +290,10 @@ private:
     publishBuilder(bool rebuildBooks);
 
     void
-    notifySubscriptions(bool revalidateOnly, bool allowDeepen = false);
+    notifySubscriptions(
+        bool revalidateOnly,
+        bool allowDeepen = false,
+        bool booksMoved = true);
 
     void
     midCloseTick();

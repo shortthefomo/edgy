@@ -153,10 +153,19 @@ cmake --build .build --parallel --target edgy_tests
 ctest --test-dir .build --output-on-failure
 ```
 
-or run the binary directly:
+Suites (also as their own binaries):
+
+| Suite | Binary | What it locks |
+| --- | --- | --- |
+| `edgy_test_reprice` | `.build/edgy_test_reprice` | ledger close always recalcs; idle mid-close may replay |
+| `edgy_test_config` | `.build/edgy_test_config` | cfg / CLI / version / log rotate |
+| `edgy_test_path` | `.build/edgy_test_path` | books, CLOB, Pathfinder, digest, path_find JSON |
+
+`.build/edgy_tests` is the same as `edgy_test_path` (legacy name).
 
 ```bash
-.build/edgy_tests
+ctest --test-dir .build -R reprice --output-on-failure
+.build/edgy_test_reprice
 ```
 
 On a multi-config generator the binaries sit under `.build/Release/` (or `.build/Debug/`).
@@ -243,7 +252,7 @@ On Apple Silicon, Docker builds `linux/amd64` (qemu). That is slow; the GitHub A
 
 `PLATFORM=linux/arm64 ./release-builder.sh` builds `*-linux-arm64` instead.
 
-Current release is `0.1.7`. After that tag, develop is `0.1.8-b46`. To cut the next release:
+Current release is `0.1.7`. After that tag, develop is `0.1.8-b50`. To cut the next release:
 
 ```bash
 # 1. set kVersionBase to "X.Y.Z" (and project(edgy VERSION X.Y.Z) if the

@@ -230,11 +230,21 @@ target_link_libraries(edgy-xrpld PRIVATE edgy_xrpld_core)
 add_executable(edgy-xahaud src/app/main.cpp)
 target_link_libraries(edgy-xahaud PRIVATE edgy_xahaud_core)
 
+enable_testing()
+
+function(edgy_add_test name source)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE edgy_xrpld_core)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+edgy_add_test(edgy_test_reprice tests/reprice_tests.cpp)
+edgy_add_test(edgy_test_config tests/config_tests.cpp)
+edgy_add_test(edgy_test_path tests/edgy_tests.cpp)
+
+# Legacy name so `.build/edgy_tests` still works.
 add_executable(edgy_tests tests/edgy_tests.cpp)
 target_link_libraries(edgy_tests PRIVATE edgy_xrpld_core)
-
-enable_testing()
-add_test(NAME edgy_tests COMMAND edgy_tests)
 
 include(GNUInstallDirs)
 install(TARGETS edgy-xrpld edgy-xahaud RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

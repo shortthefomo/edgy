@@ -128,7 +128,7 @@ ws://127.0.0.1:6006
 full
 
 [search-fast]
-full
+fast
 
 [timeout-ms]
 0
@@ -171,8 +171,8 @@ On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_
 | `[update-ms]` | Open-socket reprice interval (default 100) |
 | `[proxy]` / `--no-proxy` | Forward unknown commands (default 1) |
 | `[debug]` / `--debug` | Diagnostic log (`[debug_logfile]` also accepted). On each start the previous file is renamed `path.YYYYMMDD-HHMMSS` and a fresh log is opened. |
-| `[search]` / `--search` | Target / one-shot depth: `full` (default), `fast`, `mid`, or 0–4 |
-| `[search-fast]` / `--search-fast` | First WebSocket reply depth (default `full`) |
+| `[search]` / `--search` | Target / one-shot depth: `fast`, `mid`, or `full` (default) |
+| `[search-fast]` / `--search-fast` | First WebSocket reply depth: `fast` (default), `mid`, or `full` |
 | `[timeout-ms]` / `--timeout-ms` | Abort one search after N ms (`0` / `full` = none) |
 | `[full-snapshot]` / `--full-snapshot` | `full` (default) loads every object; `0` / `books` loads path types only |
 | `[snapshot-page]` / `--snapshot-page` | Binary `ledger_data` objects per page (1–2048, default 2048) |
@@ -183,7 +183,7 @@ On Xahau, public API is the same (`ledger`, `ledger_data`, `subscribe`, `server_
 
 `EDGY_NODE` overrides `[node]` unless `--node` is also passed. `PATHFINDER_NODE` is still accepted.
 
-Default is a full ledger sync and a full book-graph search. Set `[search-fast]` below `[search]` to start WebSocket replies shallow and deepen while the socket stays open.
+Default is a full ledger sync. WebSocket `path_find` starts at `[search-fast]` (`fast`) and can deepen to `[search]` (`full`) while the socket stays open.
 
 ## API (same as xrpld / xahaud)
 

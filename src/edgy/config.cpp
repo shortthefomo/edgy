@@ -31,8 +31,8 @@ usage()
         << "  --listen-rpc <host:port>    Local JSON-RPC HTTP\n"
         << "  --workers <n>               Concurrent path_find workers\n"
         << "  --debug <file>              Diagnostic log (rotated on each start)\n"
-        << "  --search <full|fast|mid|N>  Target / one-shot depth (default full)\n"
-        << "  --search-fast <full|fast|N> First WebSocket reply depth (default full)\n"
+        << "  --search <fast|mid|full>    Target / one-shot depth (default full)\n"
+        << "  --search-fast <fast|mid|full> First WebSocket reply depth (default fast)\n"
         << "  --timeout-ms <n>            Abort one search after N ms (0 = none)\n"
         << "  --full-snapshot [0|1|full]  Full ledger vs books-only (default full)\n"
         << "  --snapshot-page <n>         ledger_data objects per page (default 2048)\n"
@@ -86,25 +86,13 @@ int
 parseSearchLevel(std::string const& v)
 {
     auto const s = normalizeName(v);
-    if (s == "full" || s == "max")
+    if (s == "full")
         return Config::kSearchFull;
-    if (s == "fast" || s == "quick" || s == "min")
-        return 0;
-    if (s == "mid" || s == "medium" || s == "normal")
-        return 2;
-    int n = std::stoi(v);
-    if (n < 0)
-        n = 0;
-    if (n > Config::kSearchFull)
-    {
-        // xrpld path_search 5–10 maps onto FastPathFinder 2–4.
-        if (n >= 9)
-            return Config::kSearchFull;
-        if (n >= 7)
-            return 3;
-        return 2;
-    }
-    return n;
+    if (s == "mid")
+        return Config::kSearchMid;
+    if (s == "fast")
+        return Config::kSearchFast;
+    throw std::runtime_error("search level must be fast, mid, or full");
 }
 
 bool

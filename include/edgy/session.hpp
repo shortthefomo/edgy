@@ -83,6 +83,73 @@ rediscoveryDue(
     return ledgerSeq >= lastFull + iv + static_cast<xrpl::LedgerIndex>(id % iv);
 }
 
+// Mid-close with no apply: replay the last quote. Do not RippleCalc.
+[[nodiscard]] inline bool
+shouldReplayCachedQuote(bool revalidateOnly, bool booksMoved) noexcept
+{
+    return revalidateOnly && !booksMoved;
+}
+
+// Convert-all Flow only on create or a new ledger seq. Same-seq
+// revalidate is CLOB-only; a dry book keeps the last dest.
+[[nodiscard]] inline bool
+allowRevalidateFlow(
+    xrpl::LedgerIndex seq,
+    xrpl::LedgerIndex lastQuotedSeq) noexcept
+{
+    return lastQuotedSeq == 0 || seq != lastQuotedSeq;
+}
+
+// How a path_find wave is allowed to quote. Engine must use
+// pathRepricePolicy(LedgerClose) after a closed ledger is published so
+// that wave cannot replay a cached dest.
+enum class PathRepriceWave : std::uint8_t
+{
+    Create,
+    MidCloseIdle,
+    MidCloseDirty,
+    LedgerClose,
+};
+
+struct PathRepricePolicy
+{
+    bool replayCache{false};
+    bool allowFlow{true};
+    bool allowDeepen{false};
+    bool booksMoved{true};
+};
+
+[[nodiscard]] inline PathRepricePolicy
+pathRepricePolicy(PathRepriceWave wave) noexcept
+{
+    switch (wave)
+    {
+        case PathRepriceWave::Create:
+            return {false, true, false, true};
+        case PathRepriceWave::MidCloseIdle:
+            return {true, false, false, false};
+        case PathRepriceWave::MidCloseDirty:
+            return {false, false, false, true};
+        case PathRepriceWave::LedgerClose:
+            return {false, true, true, true};
+    }
+    return {false, true, false, true};
+}
+
+// After sync publishes closed ledger `closedSeq`, path_find must recalc
+// (CLOB, and Flow if the CLOB is dry). lastQuoted from an older seq
+// must not suppress that.
+[[nodiscard]] inline bool
+mustRecalcAfterLedgerClose(
+    xrpl::LedgerIndex closedSeq,
+    xrpl::LedgerIndex lastQuotedSeq) noexcept
+{
+    auto const p = pathRepricePolicy(PathRepriceWave::LedgerClose);
+    if (p.replayCache || !p.booksMoved || !p.allowFlow)
+        return false;
+    return allowRevalidateFlow(closedSeq, lastQuotedSeq);
+}
+
 /**
  * One path_find / ripple_path_find request.
  *
@@ -119,7 +186,8 @@ public:
         std::shared_ptr<xrpl::AssetCache> const& cache,
         bool fast,
         bool revalidateOnly = false,
-        std::shared_ptr<xrpl::ReadView const> const& calcLedger = {});
+        std::shared_ptr<xrpl::ReadView const> const& calcLedger = {},
+        bool booksMoved = true);
 
     [[nodiscard]] int
     id() const
@@ -227,6 +295,7 @@ private:
 
     bool lastSuccess_{false};
     xrpl::LedgerIndex lastFullSearchIndex_{0};
+    xrpl::LedgerIndex lastQuotedSeq_{0};
     std::uint64_t lastLineEpoch_{0};
     std::atomic<bool> closing_{false};
     std::atomic<bool> updating_{false};

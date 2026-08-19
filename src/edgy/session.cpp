@@ -347,7 +347,8 @@ quoteConvertAll(
     xrpl::STPathSet const& found,
     std::optional<xrpl::uint256> const& domain,
     PathServices& services,
-    xrpl::path::RippleCalc::Input const& rcInput)
+    xrpl::path::RippleCalc::Input const& rcInput,
+    bool allowFlow = true)
 {
     PaidQuote best;
     auto quoteAmt = [&](xrpl::STPathSet const& paths,
@@ -418,13 +419,19 @@ quoteConvertAll(
     }
     if (best.ok)
         return best;
-
+    // One Flow only. dest/dest+XRP were already walked as CLOB; a
+    // second and third convert-all RippleCalc was the 1.5–4s tail.
+    if (!allowFlow)
+        return best;
     if (!found.empty())
+    {
         quote(found, true);
+        return best;
+    }
     xrpl::STPathSet destOnly;
     pathSetPushAlways(destOnly, directDestPath(destAsset));
     quote(destOnly, false);
-    if (xrpl::isXRP(saMax.asset()) || xrpl::isXRP(destAsset))
+    if (best.ok || xrpl::isXRP(saMax.asset()) || xrpl::isXRP(destAsset))
         return best;
     xrpl::STPathSet bridgeOnly;
     pathSetPushAlways(bridgeOnly, xrpBridgePath(destAsset));
@@ -859,6 +866,7 @@ PathSession::revalidatePaths(
     {
         // Same pick-best as the full search. Revalidate used to Flow
         // only the cached six and overwrite a dest+XRP 8750 with 8590.
+        auto const seq = ledger ? ledger->seq() : 0;
         best = quoteConvertAll(
             ledger,
             saMaxAmount,
@@ -868,10 +876,14 @@ PathSession::revalidatePaths(
             paths,
             domain_,
             registry_,
-            rcInput);
+            rcInput,
+            allowRevalidateFlow(seq, lastQuotedSeq_));
         clobWalkFault_ = best.clobWalkFault;
         if (best.ok)
+        {
+            lastQuotedSeq_ = seq;
             context_[asset] = cappedPaths(mergePaths(best.paths, paths));
+        }
     }
     else
     {
@@ -1135,10 +1147,14 @@ PathSession::findPaths(
                     ps,
                     domain_,
                     registry_,
-                    rcInput);
+                    rcInput,
+                    true);
                 clobWalkFault_ = best.clobWalkFault;
                 if (best.ok)
+                {
+                    lastQuotedSeq_ = ledger ? ledger->seq() : 0;
                     ps = cappedPaths(mergePaths(best.paths, ps));
+                }
             }
             else
             {
@@ -1155,6 +1171,7 @@ PathSession::findPaths(
                     convertAll_);
                 if (best.ok)
                 {
+                    lastQuotedSeq_ = ledger ? ledger->seq() : 0;
                     ps = cappedPaths(mergePaths(best.paths, found.paths));
                     if (static_cast<int>(ps.size()) < SearchBudget::kMaxPathCount)
                         ps = cappedPaths(mergePaths(ps, found.discovered));
@@ -1243,8 +1260,16 @@ PathSession::doUpdate(
     std::shared_ptr<xrpl::AssetCache> const& cache,
     bool fast,
     bool revalidateOnly,
-    std::shared_ptr<xrpl::ReadView const> const& calcLedger)
+    std::shared_ptr<xrpl::ReadView const> const& calcLedger,
+    bool booksMoved)
 {
+    if (shouldReplayCachedQuote(revalidateOnly, booksMoved))
+    {
+        std::lock_guard const sl(lock_);
+        if (jvStatus_.isMember(xrpl::jss::alternatives))
+            return emitNative(jvStatus_, cfg_.network);
+    }
+
     xrpl::AssetCache::SearchPin const searchPin{*cache};
     xrpl::AssetCache::SessionPin const sessionPin{id_};
     std::optional<xrpl::AssetCache::LoadScope> lineLoadScope;
@@ -1298,10 +1323,9 @@ PathSession::doUpdate(
     }
 
     bool const fullSearch = !revalidateOnly;
-    // Dead context_ paths must run FastPathFinder again. Leaving
-    // allowEscalate false replayed the last quote for the life of the
-    // socket (path_revalidate_failed) while the market moved.
-    bool const allowEscalate = true;
+    // Revalidate must not FastPathFinder. A dry CLOB used to escalate
+    // and run a depth-4 search on every tick.
+    bool const allowEscalate = !revalidateOnly;
 
     json::Value jvArray = kJsonArray;
     bool didFullSearch = false;
@@ -1328,9 +1352,21 @@ PathSession::doUpdate(
         }
         if (restoredStale)
         {
-            lastSuccess_ = false;
-            newStatus[xrpl::jss::full_reply] = false;
-            setPathFindNotice(newStatus, WarnPathRevalidateFailed);
+            // Same-seq dry CLOB: keep the last dest quietly. Only warn
+            // when we have never published a live quote.
+            if (lastSuccess_)
+            {
+                lastSuccess_ = true;
+                auto const atTarget =
+                    lastDepth_.load(std::memory_order_acquire) >= cfg_.search;
+                newStatus[xrpl::jss::full_reply] = atTarget;
+            }
+            else
+            {
+                lastSuccess_ = false;
+                newStatus[xrpl::jss::full_reply] = false;
+                setPathFindNotice(newStatus, WarnPathRevalidateFailed);
+            }
         }
         else
         {

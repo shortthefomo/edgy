@@ -1291,9 +1291,9 @@ Engine::applyLedgerClosed(json::Value const& msg)
         if (handler)
             handler(std::move(closed));
     }
-    // Reprice, and let a couple of sockets rediscover hops. Mid-close
-    // ticks must not FastPathFinder — that convoyed 100 sessions.
-    notifySubscriptions(true, true);
+    // Closed ledger: never replay a cached dest. CLOB + Flow if dry.
+    auto const close = pathRepricePolicy(PathRepriceWave::LedgerClose);
+    notifySubscriptions(true, close.allowDeepen, close.booksMoved);
 }
 
 void
@@ -1417,7 +1417,7 @@ Engine::maybeDigestAfterApply()
             digestDoneSeq_.load()))
         return;
     digestDoneSeq_.store(currentSeq_.load(), std::memory_order_relaxed);
-    if (dirty_.exchange(false, std::memory_order_acq_rel))
+    if (dirty_.load(std::memory_order_acquire))
         publishBuilder(false);
     scheduleDigestCheck();
 }
@@ -1641,13 +1641,16 @@ Engine::midCloseTick()
     }
     if (!live)
         return;
-    if (dirty_.exchange(false, std::memory_order_acq_rel))
+    bool const dirty = dirty_.exchange(false, std::memory_order_acq_rel);
+    if (dirty)
         publishBuilder(false);
-    notifySubscriptions(true, false);
+    auto const wave = dirty ? PathRepriceWave::MidCloseDirty : PathRepriceWave::MidCloseIdle;
+    auto const mid = pathRepricePolicy(wave);
+    notifySubscriptions(true, mid.allowDeepen, mid.booksMoved);
 }
 
 void
-Engine::notifySubscriptions(bool revalidateOnly, bool allowDeepen)
+Engine::notifySubscriptions(bool revalidateOnly, bool allowDeepen, bool booksMoved)
 {
     if (stop_.load() || !pool_)
         return;
@@ -1690,7 +1693,7 @@ Engine::notifySubscriptions(bool revalidateOnly, bool allowDeepen)
         bool const deepen = !reval;
         try
         {
-            pool_->submit([this, sub, cache, reval, deepen] {
+            pool_->submit([this, sub, cache, reval, deepen, booksMoved] {
                 try
                 {
                     if (!sub.session->closing())
@@ -1703,7 +1706,8 @@ Engine::notifySubscriptions(bool revalidateOnly, bool allowDeepen)
                         if (deepen)
                             deepens_.fetch_add(1);
                         auto const t0 = std::chrono::steady_clock::now();
-                        auto update = sub.session->doUpdate(cache, false, reval);
+                        auto update = sub.session->doUpdate(
+                            cache, false, reval, {}, booksMoved);
                         noteSearchMs(static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - t0)

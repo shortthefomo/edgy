@@ -270,11 +270,8 @@ main(int argc, char** argv)
                   << "  workers   " << cfg.workers << '\n'
                   << "  net       " << cfg.netThreads << " event-loop threads\n"
                   << "  update    " << cfg.midCloseDelay.count() << "ms\n"
-                  << "  search    " << cfg.search
-                  << (cfg.search == edgy::Config::kSearchFull ? " (full)" : "")
-                  << '\n'
-                  << "  search-fast " << cfg.searchFast
-                  << (cfg.searchFast == edgy::Config::kSearchFull ? " (full)" : "")
+                  << "  search    " << edgy::Config::searchLevelName(cfg.search) << '\n'
+                  << "  search-fast " << edgy::Config::searchLevelName(cfg.searchFast)
                   << '\n'
                   << "  timeout   "
                   << (cfg.searchTimeout.count() == 0
