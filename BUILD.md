@@ -198,9 +198,9 @@ This is the rippled-shaped path: Conan `Release` + CMake `Release`, then an iden
 
 ```bash
 .build/edgy-xrpld --version
-# edgy 0.1.7+xrpld.<git>
+# edgy 0.2.0+xrpld.<git>
 .build/edgy-xahaud --version
-# edgy 0.1.7+xahaud.<git>
+# edgy 0.2.0+xahaud.<git>
 ```
 
 A Debug Edgy prints `+DEBUG` in the version (same idea as `xrpld --version`). Do not mix a Release Edgy with a Debug `libxrpl.a`.
@@ -252,7 +252,7 @@ On Apple Silicon, Docker builds `linux/amd64` (qemu). That is slow; the GitHub A
 
 `PLATFORM=linux/arm64 ./release-builder.sh` builds `*-linux-arm64` instead.
 
-Current release is `0.1.7`. After that tag, develop is `0.1.8-b50`. To cut the next release:
+Current release is `0.2.0`. After that tag, develop is `0.2.1-b0`. To cut the next release:
 
 ```bash
 # 1. set kVersionBase to "X.Y.Z" (and project(edgy VERSION X.Y.Z) if the
